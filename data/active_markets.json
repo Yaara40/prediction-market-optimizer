@@ -1,6 +1,84 @@
 {
   "BTC": [
     {
+      "id": "2291459",
+      "question": "Bitcoin Up or Down - May 19, 4:35AM-4:40AM ET",
+      "endDate": "2026-05-19T08:40:00Z",
+      "lastTradePrice": 0
+    },
+    {
+      "id": "2291441",
+      "question": "Bitcoin above 75,800 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": 0.99
+    },
+    {
+      "id": "2291445",
+      "question": "Bitcoin above 77,800 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291440",
+      "question": "Bitcoin above 75,400 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": 0.99
+    },
+    {
+      "id": "2291446",
+      "question": "Bitcoin above 78,200 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291444",
+      "question": "Bitcoin above 77,400 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291442",
+      "question": "Bitcoin above 76,200 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291448",
+      "question": "Bitcoin above 79,000 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291447",
+      "question": "Bitcoin above 78,600 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291443",
+      "question": "Bitcoin above 76,600 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291439",
+      "question": "Bitcoin above 75,000 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": 0.99
+    },
+    {
+      "id": "2291432",
+      "question": "Bitcoin Up or Down - May 19, 4:30AM-4:35AM ET",
+      "endDate": "2026-05-19T08:35:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291434",
+      "question": "Bitcoin Up or Down - May 19, 4:30AM-4:45AM ET",
+      "endDate": "2026-05-19T08:45:00Z",
+      "lastTradePrice": null
+    },
+    {
       "id": "2291424",
       "question": "Bitcoin Up or Down - May 19, 4:25AM-4:30AM ET",
       "endDate": "2026-05-19T08:30:00Z",
@@ -136,7 +214,7 @@
       "id": "2291224",
       "question": "Bitcoin above 76,200 on May 18, 5AM ET?",
       "endDate": "2026-05-18T09:00:00Z",
-      "lastTradePrice": 0.99
+      "lastTradePrice": 0.999
     },
     {
       "id": "2291230",
@@ -472,7 +550,7 @@
       "id": "2290213",
       "question": "Will Microstrategy announce a Bitcoin purchase May 19-25?",
       "endDate": "2026-05-26T04:00:00Z",
-      "lastTradePrice": 0.23
+      "lastTradePrice": 0.26
     },
     {
       "id": "2290318",
@@ -586,7 +664,7 @@
       "id": "2289401",
       "question": "Will Bitcoin dip to $76,000 on May 18?",
       "endDate": "2026-05-19T04:00:00Z",
-      "lastTradePrice": 0.41
+      "lastTradePrice": 0.45
     },
     {
       "id": "2289423",
@@ -700,7 +778,7 @@
       "id": "2289405",
       "question": "Will Bitcoin dip to $75,000 on May 18?",
       "endDate": "2026-05-19T04:00:00Z",
-      "lastTradePrice": 0.13
+      "lastTradePrice": 0.14
     },
     {
       "id": "2289402",
@@ -1001,21 +1079,87 @@
       "question": "Bitcoin Up or Down - May 18, 9:15PM-9:30PM ET",
       "endDate": "2026-05-19T01:30:00Z",
       "lastTradePrice": null
-    },
-    {
-      "id": "2288733",
-      "question": "Bitcoin Up or Down - May 18, 9:15PM-9:20PM ET",
-      "endDate": "2026-05-19T01:20:00Z",
-      "lastTradePrice": null
-    },
-    {
-      "id": "2288723",
-      "question": "Bitcoin Up or Down - May 18, 9:10PM-9:15PM ET",
-      "endDate": "2026-05-19T01:15:00Z",
-      "lastTradePrice": null
     }
   ],
   "ETH": [
+    {
+      "id": "2291465",
+      "question": "Ethereum Up or Down - May 19, 4:35AM-4:40AM ET",
+      "endDate": "2026-05-19T08:40:00Z",
+      "lastTradePrice": 0
+    },
+    {
+      "id": "2291456",
+      "question": "Ethereum above 2,165 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291453",
+      "question": "Ethereum above 2,105 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291449",
+      "question": "Ethereum above 2,045 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291452",
+      "question": "Ethereum above 2,090 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291454",
+      "question": "Ethereum above 2,135 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291455",
+      "question": "Ethereum above 2,150 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291458",
+      "question": "Ethereum above 2,195 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291457",
+      "question": "Ethereum above 2,180 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291451",
+      "question": "Ethereum above 2,075 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": 0.99
+    },
+    {
+      "id": "2291450",
+      "question": "Ethereum above 2,060 on May 18, 6AM ET?",
+      "endDate": "2026-05-18T10:00:00Z",
+      "lastTradePrice": 0.99
+    },
+    {
+      "id": "2291427",
+      "question": "Ethereum Up or Down - May 19, 4:30AM-4:45AM ET",
+      "endDate": "2026-05-19T08:45:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291430",
+      "question": "Ethereum Up or Down - May 19, 4:30AM-4:35AM ET",
+      "endDate": "2026-05-19T08:35:00Z",
+      "lastTradePrice": null
+    },
     {
       "id": "2291421",
       "question": "Ethereum Up or Down - May 19, 4:25AM-4:30AM ET",
@@ -1122,7 +1266,7 @@
       "id": "2291233",
       "question": "Ethereum above 2,075 on May 18, 5AM ET?",
       "endDate": "2026-05-18T09:00:00Z",
-      "lastTradePrice": 0.39
+      "lastTradePrice": 0.999
     },
     {
       "id": "2291247",
@@ -1999,21 +2143,27 @@
       "question": "Ethereum Up or Down - May 18, 9:15PM-9:30PM ET",
       "endDate": "2026-05-19T01:30:00Z",
       "lastTradePrice": null
-    },
-    {
-      "id": "2288730",
-      "question": "Ethereum Up or Down - May 18, 9:15PM-9:20PM ET",
-      "endDate": "2026-05-19T01:20:00Z",
-      "lastTradePrice": null
-    },
-    {
-      "id": "2288726",
-      "question": "Ethereum Up or Down - May 18, 9:10PM-9:15PM ET",
-      "endDate": "2026-05-19T01:15:00Z",
-      "lastTradePrice": null
     }
   ],
   "SOL": [
+    {
+      "id": "2291461",
+      "question": "Solana Up or Down - May 19, 4:35AM-4:40AM ET",
+      "endDate": "2026-05-19T08:40:00Z",
+      "lastTradePrice": 0
+    },
+    {
+      "id": "2291436",
+      "question": "Solana Up or Down - May 19, 4:30AM-4:35AM ET",
+      "endDate": "2026-05-19T08:35:00Z",
+      "lastTradePrice": null
+    },
+    {
+      "id": "2291426",
+      "question": "Solana Up or Down - May 19, 4:30AM-4:45AM ET",
+      "endDate": "2026-05-19T08:45:00Z",
+      "lastTradePrice": null
+    },
     {
       "id": "2291423",
       "question": "Solana Up or Down - May 19, 4:25AM-4:30AM ET",
@@ -2900,24 +3050,6 @@
       "id": "2288494",
       "question": "Solana Up or Down - May 19, 8PM ET",
       "endDate": "2026-05-20T01:00:00Z",
-      "lastTradePrice": null
-    },
-    {
-      "id": "2288743",
-      "question": "Solana Up or Down - May 18, 9:15PM-9:30PM ET",
-      "endDate": "2026-05-19T01:30:00Z",
-      "lastTradePrice": null
-    },
-    {
-      "id": "2288732",
-      "question": "Solana Up or Down - May 18, 9:15PM-9:20PM ET",
-      "endDate": "2026-05-19T01:20:00Z",
-      "lastTradePrice": null
-    },
-    {
-      "id": "2288727",
-      "question": "Solana Up or Down - May 18, 9:10PM-9:15PM ET",
-      "endDate": "2026-05-19T01:15:00Z",
       "lastTradePrice": null
     }
   ]

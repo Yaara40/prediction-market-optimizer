@@ -118,13 +118,23 @@ def get_resolved_markets():
         for coin, keywords in KEYWORDS.items():
             if matches_coin(text, keywords):
                 filtered[coin].append({
-                    "id": market.get("id"),
-                    "question": market.get("question"),
-                    "endDate": market.get("endDate"),
-                    "lastTradePrice": market.get("lastTradePrice"),
-                    "outcomePrices": market.get("outcomePrices"),
-                    "outcomes": market.get("outcomes")
-                })
+    "id": market.get("id"),
+    "question": market.get("question"),
+    "startDate": market.get("startDate"),
+    "endDate": market.get("endDate"),
+    "outcomePrices": market.get("outcomePrices"),
+    "outcomes": market.get("outcomes"),
+    "volume": market.get("volume"),
+    "volumeNum": market.get("volumeNum"),
+    "liquidity": market.get("liquidity"),
+    "lastTradePrice": market.get("lastTradePrice"),
+    "bestBid": market.get("bestBid"),
+    "bestAsk": market.get("bestAsk"),
+    "spread": market.get("spread"),
+    "oneDayPriceChange": market.get("oneDayPriceChange"),
+    "closed": market.get("closed"),
+    "acceptingOrders": market.get("acceptingOrders"),
+})
 
     return filtered
 
