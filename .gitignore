@@ -6,3 +6,4 @@ catboost_info/
 .DS_Store
 **/.DS_Store
 catboost_info/
+src/model/*.pkl
