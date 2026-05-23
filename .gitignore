@@ -1,7 +1,8 @@
 .env
 __pycache__/
 .DS_Storesrc/model/best_model_tabpfn.pkl
-src/model/best_model.pkl
+src/model/best_model_tabpfn.pkl
 catboost_info/
 .DS_Store
 **/.DS_Store
+catboost_info/
