@@ -5,11 +5,9 @@ from datetime import datetime, timezone
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, brier_score_loss
 from sklearn.ensemble import RandomForestClassifier
-import tabpfn
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
-from tabpfn import TabPFNClassifier
 import joblib
 
 def load_data():
@@ -77,17 +75,6 @@ def train_models(df):
         brier = brier_score_loss(y_test, y_prob)
         results[name] = {"model": model, "accuracy": acc, "brier": brier}
         print(f"{name}: accuracy={acc:.3f} | brier={brier:.3f}")
-
-    # TabPFN with CPU — all samples
-    print("TabPFN: training on all samples with CPU...")
-    tabpfn = TabPFNClassifier(device="cpu")
-    tabpfn.fit(X_train[:100], y_train[:100])
-    y_pred = tabpfn.predict(X_test)
-    y_prob = tabpfn.predict_proba(X_test)[:, 1]
-    acc = accuracy_score(y_test, y_pred)
-    brier = brier_score_loss(y_test, y_prob)
-    results["TabPFN"] = {"model": tabpfn, "accuracy": acc, "brier": brier}
-    print(f"TabPFN: accuracy={acc:.3f} | brier={brier:.3f}")
 
     best_name = min(results, key=lambda x: results[x]["brier"])
     print(f"\nbest model: {best_name}")

@@ -5,26 +5,10 @@ import pandas as pd
 from datetime import datetime, timezone
 from src.data.coingecko import get_correlation_matrix
 from src.optimizer.kelly_markowitz import optimize_portfolio
-import torch
 
 def load_model():
-    """load the trained TabPFN model"""
-    original_load = torch.load
-    torch.load = lambda *args, **kwargs: original_load(
-        *args, **{**kwargs, 'map_location': 'cpu', 'weights_only': False}
-    )
-    model = joblib.load("src/model/best_model_tabpfn_cpu.pkl")
-    torch.load = original_load
-    
-    # force model to use CPU for inference
-    model.device = "cpu"
-    if hasattr(model, 'executor_'):
-        try:
-            model.executor_.device = "cpu"
-        except:
-            pass
-    
-    return model
+    """load the trained CatBoost model"""
+    return joblib.load("src/model/best_model.pkl")
 
 def load_active_markets():
     """load active markets from saved json"""
@@ -42,10 +26,13 @@ def predict_probabilities(model, markets: dict) -> dict:
     for coin_idx, (coin, coin_markets) in enumerate(markets.items()):
         results[coin] = []
         for market in coin_markets:
+            # get real market price — skip if no real trading price exists
             market_price = market.get("lastTradePrice")
-            if market_price is None:
-                market_price = market.get("bestAsk", 0.5)
-            if market_price is None:
+            if not market_price:
+                market_price = market.get("bestBid")
+            if not market_price:
+                market_price = market.get("bestAsk")
+            if not market_price or market_price == 0:
                 continue
 
             try:
@@ -137,18 +124,4 @@ def run_pipeline(risk_level: int = 5, top_n: int = 3):
     return allocations, best_markets
 
 if __name__ == "__main__":
-    model = load_model()
-    markets = load_active_markets()
-    
-    # test one prediction manually
-    import pandas as pd
-    test_features = pd.DataFrame([{
-        "best_bid": 0.51,
-        "volume": 1000,
-        "spread": 0.01,
-        "duration_hours": 24,
-        "coin": 0
-    }])
-    
-    print("test prediction:")
-    print(model.predict_proba(test_features))
+    run_pipeline(risk_level=5)
