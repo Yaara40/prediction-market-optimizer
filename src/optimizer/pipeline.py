@@ -5,10 +5,26 @@ import pandas as pd
 from datetime import datetime, timezone
 from src.data.coingecko import get_correlation_matrix
 from src.optimizer.kelly_markowitz import optimize_portfolio
+import torch
 
 def load_model():
     """load the trained TabPFN model"""
-    return joblib.load("src/model/best_model_tabpfn_cpu.pkl")
+    original_load = torch.load
+    torch.load = lambda *args, **kwargs: original_load(
+        *args, **{**kwargs, 'map_location': 'cpu', 'weights_only': False}
+    )
+    model = joblib.load("src/model/best_model_tabpfn_cpu.pkl")
+    torch.load = original_load
+    
+    # force model to use CPU for inference
+    model.device = "cpu"
+    if hasattr(model, 'executor_'):
+        try:
+            model.executor_.device = "cpu"
+        except:
+            pass
+    
+    return model
 
 def load_active_markets():
     """load active markets from saved json"""
@@ -121,4 +137,18 @@ def run_pipeline(risk_level: int = 5, top_n: int = 3):
     return allocations, best_markets
 
 if __name__ == "__main__":
-    run_pipeline(risk_level=5)
+    model = load_model()
+    markets = load_active_markets()
+    
+    # test one prediction manually
+    import pandas as pd
+    test_features = pd.DataFrame([{
+        "best_bid": 0.51,
+        "volume": 1000,
+        "spread": 0.01,
+        "duration_hours": 24,
+        "coin": 0
+    }])
+    
+    print("test prediction:")
+    print(model.predict_proba(test_features))

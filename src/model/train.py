@@ -5,11 +5,12 @@ from datetime import datetime, timezone
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, brier_score_loss
 from sklearn.ensemble import RandomForestClassifier
+import tabpfn
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
-import joblib
 from tabpfn import TabPFNClassifier
+import joblib
 
 def load_data():
     with open("data/resolved_markets_12h_7days.json") as f:
@@ -77,13 +78,10 @@ def train_models(df):
         results[name] = {"model": model, "accuracy": acc, "brier": brier}
         print(f"{name}: accuracy={acc:.3f} | brier={brier:.3f}")
 
-    # TabPFN separately with limited data
-    print("TabPFN: training on 500 samples (designed for small datasets)...")
-    from tabpfn import TabPFNClassifier
-    tabpfn = TabPFNClassifier(device="cpu", n_estimators=4)
-    X_train_small = X_train[:500]
-    y_train_small = y_train[:500]
-    tabpfn.fit(X_train_small, y_train_small)
+    # TabPFN with CPU — all samples
+    print("TabPFN: training on all samples with CPU...")
+    tabpfn = TabPFNClassifier(device="cpu")
+    tabpfn.fit(X_train[:100], y_train[:100])
     y_pred = tabpfn.predict(X_test)
     y_prob = tabpfn.predict_proba(X_test)[:, 1]
     acc = accuracy_score(y_test, y_pred)
@@ -94,6 +92,7 @@ def train_models(df):
     best_name = min(results, key=lambda x: results[x]["brier"])
     print(f"\nbest model: {best_name}")
     return results[best_name]["model"], best_name
+
 if __name__ == "__main__":
     print("loading data...")
     df = load_data()
@@ -103,5 +102,5 @@ if __name__ == "__main__":
     print("\ntraining models...")
     best_model, best_name = train_models(df)
 
-    joblib.dump(best_model, f"src/model/best_model.pkl")
+    joblib.dump(best_model, "src/model/best_model.pkl")
     print(f"\nsaved best model ({best_name}) → src/model/best_model.pkl")
