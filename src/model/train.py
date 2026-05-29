@@ -10,48 +10,10 @@ from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
 import joblib
 
-def load_data():
-    with open("data/resolved_markets_12h_7days.json") as f:
-        raw = json.load(f)
+def load_data(filepath: str) -> pd.DataFrame:
+    return pd.read_csv(filepath)
 
-    rows = []
-    for coin_idx, (coin, markets) in enumerate(raw.items()):
-        for m in markets:
-            best_bid = m.get("bestBid")
-            volume = m.get("volumeNum")
-            spread = m.get("spread")
-            start = m.get("startDate")
-            end = m.get("endDate")
-            outcome_prices = m.get("outcomePrices")
-
-            if best_bid is None or outcome_prices is None:
-                continue
-
-            try:
-                start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
-                duration_hours = (end_dt - start_dt).total_seconds() / 3600
-            except:
-                continue
-
-            try:
-                prices = json.loads(outcome_prices)
-                label = 1 if prices[0] == "1" else 0
-            except:
-                continue
-
-            rows.append({
-                "best_bid": best_bid,
-                "volume": volume if volume else 0,
-                "spread": spread if spread else 0,
-                "duration_hours": duration_hours,
-                "coin": coin_idx,
-                "label": label
-            })
-
-    return pd.DataFrame(rows)
-
-def train_models(df):
+def train_models(df: pd.DataFrame, dataset_name: str):
     X = df.drop("label", axis=1)
     y = df["label"]
 
@@ -66,6 +28,7 @@ def train_models(df):
         "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42),
     }
 
+    print(f"\n{dataset_name} — {len(df)} samples, {len(X.columns)} features")
     results = {}
     for name, model in models.items():
         model.fit(X_train, y_train)
@@ -74,20 +37,21 @@ def train_models(df):
         acc = accuracy_score(y_test, y_pred)
         brier = brier_score_loss(y_test, y_prob)
         results[name] = {"model": model, "accuracy": acc, "brier": brier}
-        print(f"{name}: accuracy={acc:.3f} | brier={brier:.3f}")
+        print(f"  {name}: accuracy={acc:.3f} | brier={brier:.3f}")
 
     best_name = min(results, key=lambda x: results[x]["brier"])
-    print(f"\nbest model: {best_name}")
+    print(f"  best: {best_name}")
     return results[best_name]["model"], best_name
 
 if __name__ == "__main__":
-    print("loading data...")
-    df = load_data()
-    print(f"total samples: {len(df)}")
-    print(f"label distribution: {df['label'].value_counts().to_dict()}")
+    datasets = {
+        "5min": "data/raw/dataset_5min.csv",
+        "15min": "data/raw/dataset_15min.csv",
+    }
 
-    print("\ntraining models...")
-    best_model, best_name = train_models(df)
-
-    joblib.dump(best_model, "src/model/best_model.pkl")
-    print(f"\nsaved best model ({best_name}) → src/model/best_model.pkl")
+    for name, path in datasets.items():
+        print(f"\nloading {name} dataset...")
+        df = load_data(path)
+        best_model, best_name = train_models(df, name)
+        joblib.dump(best_model, f"src/model/best_model_{name}.pkl")
+        print(f"  saved → src/model/best_model_{name}.pkl")
