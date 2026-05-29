@@ -186,18 +186,19 @@ def get_resolved_markets_by_timeframe(min_hours: int, max_hours: int):
                     "bestAsk": market.get("bestAsk"),
                     "spread": market.get("spread"),
                     "closed": market.get("closed"),
+                    "clobTokenIds": market.get("clobTokenIds"),
                 })
 
     return filtered
 
 if __name__ == "__main__":
-    print("--- fetching active markets ---")
-    active = get_active_markets()
-    total_active = sum(len(v) for v in active.values())
-    print(f"found {total_active} active crypto markets")
-    with open("data/active_markets.json", "w") as f:
-        json.dump(active, f, indent=2)
-    print("saved → data/active_markets.json")
+    # print("--- fetching active markets ---")
+    # active = get_active_markets()
+    # total_active = sum(len(v) for v in active.values())
+    # print(f"found {total_active} active crypto markets")
+    # with open("data/active_markets.json", "w") as f:
+    #     json.dump(active, f, indent=2)
+    # print("saved → data/active_markets.json")
 
     print("\n--- fetching 12h-7day resolved markets ---")
     resolved = get_resolved_markets_by_timeframe(min_hours=12, max_hours=168)
