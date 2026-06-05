@@ -21,43 +21,36 @@ def matches_coin(text: str, keywords: list) -> bool:
 def is_daily_market(question: str) -> bool:
     return bool(re.search(r"up or down on \w+ \d+\?", question, re.IGNORECASE))
 
-def fetch_page(after_slug, retries=5):
-    params = {
-        "limit": 100,
-        "order": "startDate",
-        "ascending": "false",
-        "closed": "true",
-        "tag_slug": "daily"
-    }
-    if after_slug:
-        params["after_cursor"] = after_slug
-
-    for attempt in range(retries):
-        try:
-            response = requests.get(
-                f"{GAMMA_BASE_URL}/events",
-                params=params,
-                timeout=30
-            )
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            wait = 5 * (attempt + 1)
-            print(f"  attempt {attempt+1}/{retries} failed: {e} — retrying in {wait}s")
-            time.sleep(wait)
-    return None
-
 def fetch(max_pages: int = 500) -> dict:
-    after_slug = None
+    offset = 0
     collected = {"BTC": [], "ETH": [], "SOL": [], "XRP": [], "BNB": [], "DOGE": [], "HYPE": []}
+    seen_ids = set()
     consecutive_failures = 0
 
     for page in range(max_pages):
-        events = fetch_page(after_slug)
+        params = {
+            "limit": 100,
+            "order": "startDate",
+            "ascending": "false",
+            "closed": "true",
+            "tag_slug": "daily",
+            "offset": offset
+        }
+
+        events = None
+        for attempt in range(5):
+            try:
+                response = requests.get(f"{GAMMA_BASE_URL}/events", params=params, timeout=30)
+                response.raise_for_status()
+                events = response.json()
+                break
+            except Exception as e:
+                wait = 5 * (attempt + 1)
+                print(f"  attempt {attempt+1}/5 failed: {e} — retrying in {wait}s")
+                time.sleep(wait)
 
         if events is None:
             consecutive_failures += 1
-            print(f"page {page+1}: failed — skipping")
             if consecutive_failures >= 3:
                 print("3 consecutive failures — stopping")
                 break
@@ -70,6 +63,11 @@ def fetch(max_pages: int = 500) -> dict:
 
         for event in events:
             for market in event.get("markets", []):
+                mid = market.get("id")
+                if mid in seen_ids:
+                    continue
+                seen_ids.add(mid)
+
                 question = market.get("question", "")
                 if not is_daily_market(question):
                     continue
@@ -78,7 +76,7 @@ def fetch(max_pages: int = 500) -> dict:
                 for coin, keywords in KEYWORDS.items():
                     if matches_coin(text, keywords):
                         collected[coin].append({
-                            "id": market.get("id"),
+                            "id": mid,
                             "question": question,
                             "startDate": market.get("startDate"),
                             "endDate": market.get("endDate"),
@@ -95,14 +93,11 @@ def fetch(max_pages: int = 500) -> dict:
                             "duration_minutes": 1440,
                         })
 
-        after_slug = events[-1].get("slug") if events else None
+        offset += 100
 
         if (page + 1) % 10 == 0:
             total = sum(len(v) for v in collected.values())
-            print(f"page {page+1}: {total} markets collected")
-
-        if not after_slug:
-            break
+            print(f"page {page+1} (offset {offset}): {total} markets collected")
 
         time.sleep(0.1)
 
