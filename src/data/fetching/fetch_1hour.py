@@ -10,26 +10,18 @@ KEYWORDS = {
     "ETH": [r"\bethereum\b", r"\beth\b"],
     "SOL": [r"\bsolana\b", r"\bsol\b"],
     "XRP": [r"\bxrp\b", r"\bripple\b"],
-    "BNB": [r"\bbnb\b", r"\bbinance\b"]
+    "BNB": [r"\bbnb\b", r"\bbinance\b"],
+    "DOGE": [r"\bdogecoin\b", r"\bdoge\b"],
+    "HYPE": [r"\bhype\b", r"\bhyperliquid\b"]
 }
 
 def matches_coin(text: str, keywords: list) -> bool:
     return any(re.search(k, text, re.IGNORECASE) for k in keywords)
 
 def get_duration_minutes(question: str) -> float | None:
-    match = re.search(r"(\d+):(\d+)(AM|PM)-(\d+):(\d+)(AM|PM)", question, re.IGNORECASE)
-    if not match:
-        return None
-    h1, m1 = int(match.group(1)), int(match.group(2))
-    h2, m2 = int(match.group(4)), int(match.group(5))
-    p1, p2 = match.group(3).upper(), match.group(6).upper()
-    if p1 == "PM" and h1 != 12: h1 += 12
-    if p1 == "AM" and h1 == 12: h1 = 0
-    if p2 == "PM" and h2 != 12: h2 += 12
-    if p2 == "AM" and h2 == 12: h2 = 0
-    mins = (h2 * 60 + m2) - (h1 * 60 + m1)
-    if mins <= 0: mins += 24 * 60
-    return mins
+    if re.search(r"up or down - .+, \d+[AP]M ET$", question, re.IGNORECASE):
+        return 60
+    return None
 
 def fetch_page(after_cursor, retries=5):
     params = {
@@ -56,9 +48,9 @@ def fetch_page(after_cursor, retries=5):
             time.sleep(wait)
     return None
 
-def fetch(max_pages: int = 2000, sample_every: int = 1) -> dict:
+def fetch(max_pages: int = 2000, sample_every: int = 2) -> dict:
     after_cursor = None
-    collected = {"BTC": [], "ETH": [], "SOL": [], "XRP": [], "BNB": []}
+    collected = {"BTC": [], "ETH": [], "SOL": [], "XRP": [], "BNB": [], "DOGE": [], "HYPE": []}
     market_counter = 0
     consecutive_failures = 0
 
@@ -122,7 +114,7 @@ def fetch(max_pages: int = 2000, sample_every: int = 1) -> dict:
     return collected
 
 if __name__ == "__main__":
-    print("fetching 1-hour markets (all, no sampling)...")
+    print("fetching 1-hour markets (every 2nd)...")
     markets = fetch()
     total = sum(len(v) for v in markets.values())
     print(f"\ndone: {total} markets")
