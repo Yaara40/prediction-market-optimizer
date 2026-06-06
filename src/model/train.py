@@ -17,6 +17,8 @@ DATASETS = {
     "monthly": "data/datasets/dataset_monthly.csv",
 }
 
+TYPE_MAP = {"5min": 0, "15min": 1, "1hour": 2, "4hour": 3, "1day": 4, "weekly": 5, "monthly": 6}
+
 def train_models(df: pd.DataFrame, name: str):
     X = df.drop("label", axis=1)
     y = df["label"]
@@ -46,9 +48,30 @@ def train_models(df: pd.DataFrame, name: str):
     print(f"  best: {best_name}")
     return results[best_name]["model"], best_name
 
+def build_combined_dataset():
+    dfs = []
+    for name, path in DATASETS.items():
+        try:
+            df = pd.read_csv(path)
+            df["market_type"] = TYPE_MAP[name]
+            dfs.append(df)
+        except FileNotFoundError:
+            print(f"  skipping {name} - file not found")
+            continue
+
+    common_cols = set(dfs[0].columns)
+    for df in dfs[1:]:
+        common_cols &= set(df.columns)
+
+    print(f"  common features: {len(common_cols)}")
+    combined = pd.concat([df[list(common_cols)] for df in dfs], ignore_index=True)
+    return combined
+
 if __name__ == "__main__":
     summary = []
 
+    # phase 1: train specialized models
+    print("phase 1: training specialized models...")
     for dataset_name, path in DATASETS.items():
         print(f"\ntraining {dataset_name}...")
         try:
@@ -69,6 +92,15 @@ if __name__ == "__main__":
             "best_model": best_name,
         })
 
+    # phase 2: train combined model
+    print("\nphase 2: training combined model...")
+    combined_df = build_combined_dataset()
+    print(f"  total samples: {len(combined_df)} | features: {len(combined_df.columns)-1}")
+    best_model, best_name = train_models(combined_df, "combined")
+    joblib.dump(best_model, "src/model/best_model_all.pkl")
+    print(f"  saved → src/model/best_model_all.pkl")
+
     print("\nsummary:")
     for s in summary:
         print(f"  {s['dataset']}: {s['samples']} samples | best: {s['best_model']}")
+    print(f"  combined: {len(combined_df)} samples | best: {best_name}")
