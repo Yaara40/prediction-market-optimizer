@@ -11,6 +11,8 @@ COIN_IDS = {
     "SOL": "solana",
     "XRP": "ripple",
     "BNB": "binancecoin",
+    "DOGE": "dogecoin",
+    "HYPE": "hyperliquid",
 }
 
 CACHE_FILE = "data/correlation_cache.json"

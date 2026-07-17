@@ -7,6 +7,9 @@ from datetime import datetime, timezone, timedelta
 from src.data.coingecko import get_correlation_matrix
 from src.optimizer.kelly_markowitz import optimize_portfolio
 
+# Numeric encoding used during training (must match train.py TYPE_MAP)
+MARKET_TYPE_INT = {"5min": 0, "15min": 1, "1hour": 2, "4hour": 3, "1day": 4, "weekly": 5, "monthly": 6, "all": 7}
+
 MODEL_MAP = {
     "5min":    "src/model/best_model_5min.pkl",
     "15min":   "src/model/best_model_15min.pkl",
@@ -63,13 +66,87 @@ def load_active_markets():
         return json.load(f)
 
 def get_price_features(market: dict, coin_idx: int):
-    market_price = market.get("lastTradePrice")
-    if not market_price:
-        market_price = market.get("bestBid")
-    if not market_price:
-        market_price = market.get("bestAsk")
-    if not market_price or market_price == 0:
+    # --- Collect all available price signals ---
+    ltp = float(market.get("lastTradePrice") or 0)
+    bid = float(market.get("bestBid") or 0)
+    ask = float(market.get("bestAsk") or 0)
+
+    # Parse outcomePrices: ["0.52", "0.48"] — index 0 is YES
+    outcome_yes = None
+    try:
+        op = market.get("outcomePrices")
+        if op:
+            import json as _json
+            parsed = _json.loads(op) if isinstance(op, str) else op
+            if parsed and len(parsed) >= 1:
+                outcome_yes = float(parsed[0])
+    except Exception:
+        pass
+
+    # Best single-point estimate of the current YES price:
+    # prefer lastTradePrice if it's a real mid-market value (not 0 or 1),
+    # then outcomePrices YES, then mid(bid,ask), then ask alone
+    def valid(p):
+        return p is not None and 0.01 < p < 0.99
+
+    if valid(ltp):
+        market_price = ltp
+    elif valid(outcome_yes):
+        market_price = outcome_yes
+    elif valid(bid) and valid(ask):
+        market_price = (bid + ask) / 2.0
+    elif valid(bid):
+        market_price = bid
+    elif valid(ask):
+        market_price = ask
+    else:
         return None, None
+
+    # --- Build price trajectory ---
+    # Prefer real CLOB history if the market was enriched with it.
+    # Fall back to a synthetic trajectory only when no history is available.
+    price_history = market.get("price_history", [])
+
+    if len(price_history) >= 3:
+        # Use the real trajectory — same extraction as build_dataset scripts
+        prices = [h["p"] for h in price_history]
+        timestamps = [h["t"] for h in price_history]
+        duration = timestamps[-1] - timestamps[0]
+        n = 10
+
+        def _snap(i):
+            target = timestamps[0] + duration * i / max(n - 1, 1)
+            closest = min(range(len(timestamps)), key=lambda j: abs(timestamps[j] - target))
+            return max(0.01, min(0.99, prices[closest]))
+
+        trajectory = [_snap(i) for i in range(n)]
+
+        crossings = sum(
+            1 for i in range(1, len(prices))
+            if (prices[i - 1] < 0.5) != (prices[i] < 0.5)
+        )
+
+        # Use price at 5/50/95% of the window for early/mid/late
+        def _at_pct(pct):
+            target = timestamps[0] + duration * pct
+            closest = min(range(len(timestamps)), key=lambda j: abs(timestamps[j] - target))
+            return max(0.01, min(0.99, prices[closest]))
+
+        price_early = _at_pct(0.05)
+        price_mid   = _at_pct(0.50)
+        price_late  = _at_pct(0.95)
+
+    else:
+        # Synthetic fallback: linear drift from ~0.5 to current market_price
+        p_open = max(0.01, min(0.99, 0.5 + (market_price - 0.5) * 0.1))
+        trajectory = [
+            max(0.01, min(0.99, p_open + (market_price - p_open) * i / 9.0))
+            for i in range(10)
+        ]
+        crossings = 0
+        price_early = trajectory[0]
+        price_mid   = trajectory[4]
+        price_late  = trajectory[9]
 
     try:
         start = market.get("startDate")
@@ -80,32 +157,42 @@ def get_price_features(market: dict, coin_idx: int):
             duration_minutes = (end_dt - start_dt).total_seconds() / 60
         else:
             duration_minutes = 1440
-    except:
+    except Exception:
         duration_minutes = 1440
 
     volume = float(market.get("volumeNum") or market.get("volume") or 0)
 
     features = {
-        "price_t0": market_price,
-        "price_t1": market_price,
-        "price_t2": market_price,
-        "price_t3": market_price,
-        "price_t4": market_price,
-        "price_t5": market_price,
-        "price_t6": market_price,
-        "price_t7": market_price,
-        "price_t8": market_price,
-        "price_t9": market_price,
-        "crossings_05": 0,
-        "price_early": market_price,
-        "price_mid": market_price,
-        "price_late": market_price,
+        "price_t0": trajectory[0],
+        "price_t1": trajectory[1],
+        "price_t2": trajectory[2],
+        "price_t3": trajectory[3],
+        "price_t4": trajectory[4],
+        "price_t5": trajectory[5],
+        "price_t6": trajectory[6],
+        "price_t7": trajectory[7],
+        "price_t8": trajectory[8],
+        "price_t9": trajectory[9],
+        "crossings_05": crossings,
+        "price_early": price_early,
+        "price_mid": price_mid,
+        "price_late": price_late,
         "duration_minutes": duration_minutes,
         "volume": volume,
         "coin": coin_idx,
+        # market_type as integer for the 'all' model (0=5min,1=15min,2=1hour,3=4hour,4=1day,5=weekly,6=monthly,7=all)
+        "market_type": MARKET_TYPE_INT.get("all", 7),
     }
 
     return pd.DataFrame([features]), market_price
+
+
+def get_price_features_with_type(market: dict, coin_idx: int, market_type: str):
+    """Same as get_price_features but injects the correct market_type integer."""
+    df, mp = get_price_features(market, coin_idx)
+    if df is not None:
+        df["market_type"] = MARKET_TYPE_INT.get(market_type, 7)
+    return df, mp
 
 def predict_probabilities(markets: dict) -> dict:
     results = {}
@@ -119,7 +206,7 @@ def predict_probabilities(markets: dict) -> dict:
             if model is None:
                 continue
 
-            features, market_price = get_price_features(market, coin_idx)
+            features, market_price = get_price_features_with_type(market, coin_idx, market_type)
             if features is None:
                 continue
 
