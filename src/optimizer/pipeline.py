@@ -30,7 +30,15 @@ def load_models():
         except FileNotFoundError:
             print(f"model not found: {path}")
 
-def detect_market_type(question: str) -> str:
+def detect_market_type(question: str, market: dict = None) -> str:
+    """Classify a market's timeframe.
+
+    Priority:
+    1. Explicit time-range in question text (e.g. "10:55AM-11:00AM") → 5min/15min/1hour/4hour
+    2. startDate/endDate duration when available — most reliable for daily/weekly/monthly
+    3. Question-text patterns as fallback
+    """
+    # 1. Explicit time-range window: "10:55AM-11:00AM"
     match = re.search(r'(\d+):(\d+)(AM|PM)-(\d+):(\d+)(AM|PM)', question, re.IGNORECASE)
     if match:
         h1, m1 = int(match.group(1)), int(match.group(2))
@@ -48,16 +56,70 @@ def detect_market_type(question: str) -> str:
         if mins <= 240: return "4hour"
         return "1day"
 
-    if re.search(r'up or down - .+, \d+[AP]M ET$', question, re.IGNORECASE):
+    # 2. Question-text patterns that identify single-time-point markets (before date check)
+    # "Up or Down - July 18, 11AM ET" — resolves at a specific hour
+    if re.search(r'up or down - .+, \d+[AP]M ET', question, re.IGNORECASE):
+        return "1hour"
+    # "Bitcoin above 62,000 on July 18, 3AM ET?" — specific-hour price target
+    if re.search(r'(above|dip to|reach)[\s\S]{1,30}on \w+ \d+, \d+[AP]M', question, re.IGNORECASE):
         return "1hour"
 
+    # Multi-outcome weekly format: "What price will Bitcoin hit July 13-19?" or
+    # "What price will Bitcoin hit July 13-July 19?" — date range in question
+    if re.search(r'what price will .+ hit .+\w+ \d{1,2}[-–]\w*\s*\d{1,2}', question, re.IGNORECASE):
+        return "weekly"
+
+    # Multi-outcome monthly format: "What price will Bitcoin hit in July?" /
+    # "What price will Bitcoin hit in 2026?"
+    if re.search(r'what price will .+ hit in (\w+ 20\d\d|\w+)\??$', question, re.IGNORECASE):
+        return "monthly"
+
+    # "Bitcoin above __ on July 20?" / "Bitcoin price on July 20?" — single day target
+    if re.search(r'\b(above|price)\b.{0,30}on \w+ \d{1,2}\??$', question, re.IGNORECASE):
+        return "1day"
+
+    # 3. Use startDate/endDate duration for everything else — most reliable for daily/weekly/monthly
+    if market:
+        try:
+            start_str = market.get("startDate") or market.get("start_date")
+            end_str   = market.get("endDate")   or market.get("end_date")
+            if start_str and end_str:
+                start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                end_dt   = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                duration_hours = (end_dt - start_dt).total_seconds() / 3600
+                if duration_hours <= 5:     return "1hour"
+                if duration_hours <= 20:    return "4hour"
+                if duration_hours <= 50:    return "1day"
+                if duration_hours <= 250:   return "weekly"
+                return "monthly"
+        except Exception:
+            pass
+
+    # 4. Text-only fallback (no date info available)
+    # "will X reach/dip to Y on <date>?" — daily
+    if re.search(r'will \w+ (reach|dip to)', question, re.IGNORECASE):
+        return "1day"
     if re.search(r'up or down on \w+ \d+\?', question, re.IGNORECASE):
         return "1day"
 
+    # "in <month> <year>" or "in 20XX" — monthly
+    if re.search(r'\bin (january|february|march|april|may|june|july|august|september|october|november|december)\b', question, re.IGNORECASE):
+        return "monthly"
+    if re.search(r'by (end of )?\w+ 20\d\d', question, re.IGNORECASE):
+        return "monthly"
+    if re.search(r'\bin 20\d\d\b', question, re.IGNORECASE):
+        return "monthly"
+
+    # "this week" / "by <day of week>" / "by <month> <date>" — weekly
+    if re.search(r'\bthis week\b|\bby (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', question, re.IGNORECASE):
+        return "weekly"
+    if re.search(r'\bby \w+ \d{1,2}\b', question, re.IGNORECASE):
+        return "weekly"
+
     return "all"
 
-def get_model_for_market(question: str):
-    market_type = detect_market_type(question)
+def get_model_for_market(question: str, market: dict = None):
+    market_type = detect_market_type(question, market)
     model = MODELS.get(market_type) or MODELS.get("all")
     return model, market_type
 
@@ -71,7 +133,11 @@ def get_price_features(market: dict, coin_idx: int):
     bid = float(market.get("bestBid") or 0)
     ask = float(market.get("bestAsk") or 0)
 
-    # Parse outcomePrices: ["0.52", "0.48"] — index 0 is YES
+    # Parse outcomePrices.
+    # Binary markets: ["0.52", "0.48"] — index 0 is YES.
+    # Multi-outcome (weekly/monthly) markets: ["0.001", "0.025", "0.97", "0.001", ...]
+    # For multi-outcome markets pick the price closest to 0.5 — it's the most
+    # uncertain bucket and gives the strongest signal for ML.
     outcome_yes = None
     try:
         op = market.get("outcomePrices")
@@ -79,15 +145,22 @@ def get_price_features(market: dict, coin_idx: int):
             import json as _json
             parsed = _json.loads(op) if isinstance(op, str) else op
             if parsed and len(parsed) >= 1:
-                outcome_yes = float(parsed[0])
+                floats = [float(x) for x in parsed]
+                if len(floats) == 2:
+                    # Standard binary: index 0 is YES
+                    outcome_yes = floats[0]
+                else:
+                    # Multi-outcome: pick the one closest to 0.5
+                    outcome_yes = min(floats, key=lambda x: abs(x - 0.5))
     except Exception:
         pass
 
     # Best single-point estimate of the current YES price:
     # prefer lastTradePrice if it's a real mid-market value (not 0 or 1),
-    # then outcomePrices YES, then mid(bid,ask), then ask alone
+    # then outcomePrices YES (or best bucket for multi-outcome),
+    # then mid(bid,ask), then ask alone
     def valid(p):
-        return p is not None and 0.01 < p < 0.99
+        return p is not None and 0.005 < p < 0.995
 
     if valid(ltp):
         market_price = ltp
@@ -137,16 +210,16 @@ def get_price_features(market: dict, coin_idx: int):
         price_late  = _at_pct(0.95)
 
     else:
-        # Synthetic fallback: linear drift from ~0.5 to current market_price
-        p_open = max(0.01, min(0.99, 0.5 + (market_price - 0.5) * 0.1))
-        trajectory = [
-            max(0.01, min(0.99, p_open + (market_price - p_open) * i / 9.0))
-            for i in range(10)
-        ]
+        # Synthetic fallback: flat line at market_price.
+        # Note: predict_probabilities() skips the ML model entirely when
+        # price_history is absent, so this trajectory is only used as a
+        # feature vector sanity-check and is not fed to the classifier.
+        mp_clamped = max(0.01, min(0.99, market_price))
+        trajectory = [mp_clamped] * 10
         crossings = 0
-        price_early = trajectory[0]
-        price_mid   = trajectory[4]
-        price_late  = trajectory[9]
+        price_early = mp_clamped
+        price_mid   = mp_clamped
+        price_late  = mp_clamped
 
     try:
         start = market.get("startDate")
@@ -201,7 +274,7 @@ def predict_probabilities(markets: dict) -> dict:
         results[coin] = []
         for market in coin_markets:
             question = market.get("question", "")
-            model, market_type = get_model_for_market(question)
+            model, market_type = get_model_for_market(question, market)
 
             if model is None:
                 continue
@@ -210,16 +283,27 @@ def predict_probabilities(markets: dict) -> dict:
             if features is None:
                 continue
 
-            try:
-                model_cols = model.feature_names_in_
-                features = features.reindex(columns=model_cols, fill_value=0)
-            except AttributeError:
-                pass
+            has_real_history = len(market.get("price_history", [])) >= 3
 
-            try:
-                our_estimate = float(model.predict_proba(features)[0][1])
-            except:
+            if not has_real_history:
+                # No CLOB history → the synthetic flat trajectory gives the
+                # model no usable signal. The weekly/monthly models in
+                # particular are badly miscalibrated on flat inputs (monthly
+                # LGBMClassifier returns ~0.99 for almost any price; weekly
+                # RandomForest returns ~0.02). Fall back to market price so
+                # edge = 0 and we don't surface false opportunities.
                 our_estimate = market_price
+            else:
+                try:
+                    model_cols = model.feature_names_in_
+                    features = features.reindex(columns=model_cols, fill_value=0)
+                except AttributeError:
+                    pass
+
+                try:
+                    our_estimate = float(model.predict_proba(features)[0][1])
+                except:
+                    our_estimate = market_price
 
             results[coin].append({
                 "id": market.get("id"),

@@ -10,6 +10,7 @@ os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.getcwd())
 
 import re
+import joblib
 import requests
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -20,6 +21,8 @@ from src.optimizer.pipeline import (
     predict_probabilities,
     load_models,
     MODELS,
+    get_price_features_with_type,
+    get_model_for_market,
 )
 from src.data.coingecko import get_correlation_matrix
 from src.optimizer.kelly_markowitz import optimize_portfolio
@@ -33,6 +36,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Baseline models for live comparison ──────────────────────────────────────
+
+BASELINE_MODEL = None  # Logistic Regression trained on combined dataset
+
+def load_baseline():
+    global BASELINE_MODEL
+    try:
+        BASELINE_MODEL = joblib.load("src/model/baseline_logistic.pkl")
+        print("Loaded baseline_logistic.pkl")
+    except FileNotFoundError:
+        print("baseline_logistic.pkl not found — live comparison unavailable")
+
+
 # ── Startup: load models once ────────────────────────────────────────────────
 
 @app.on_event("startup")
@@ -40,6 +56,7 @@ def startup_event():
     print("Loading ML models...")
     load_models()
     print(f"Loaded {len(MODELS)} models.")
+    load_baseline()
 
 # ── Live Polymarket fetch with 5-min in-memory cache ─────────────────────────
 
@@ -160,19 +177,121 @@ _active_cache_ts: float = 0.0
 ACTIVE_CACHE_TTL = 60  # 1 minute — refresh often during live trading
 
 
-def fetch_active_markets(max_pages: int = 15) -> dict:
-    """Fetch today's crypto markets sorted by startDate (newest first).
-    Skips 5min markets — focuses on 1hour, 4hour, 1day, weekly, monthly markets
-    which have real price action and are what our model was trained on."""
+def _extract_market_dict(market: dict) -> dict:
+    """Normalise a raw market object into the dict shape used throughout the pipeline."""
+    return {
+        "id": market.get("id"),
+        "question": str(market.get("question", "")),
+        "startDate": market.get("startDate"),
+        "endDate": market.get("endDate"),
+        "lastTradePrice": market.get("lastTradePrice"),
+        "bestBid": market.get("bestBid"),
+        "bestAsk": market.get("bestAsk"),
+        "spread": market.get("spread"),
+        "volume": market.get("volume"),
+        "volumeNum": market.get("volumeNum"),
+        "liquidity": market.get("liquidity"),
+        "outcomes": market.get("outcomes"),
+        "outcomePrices": market.get("outcomePrices"),
+        "clobTokenIds": market.get("clobTokenIds"),
+    }
+
+
+def _fetch_events_by_tag(tag_slug: str, now_ts: float) -> list:
+    """
+    Fetch Polymarket events by tag and return a flat list of individual
+    sub-markets that are currently active (endDate in the future).
+
+    For each event we pick the ONE sub-market whose lastTradePrice is
+    closest to 0.5 — that bucket has the most uncertainty and the most
+    useful ML signal.
+    """
+    try:
+        resp = requests.get(
+            f"{GAMMA_BASE_URL}/events",
+            params={"limit": 100, "active": "true", "closed": "false", "tag_slug": tag_slug},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        events = resp.json()
+        if not isinstance(events, list):
+            return []
+    except Exception as e:
+        print(f"  events fetch ({tag_slug}) failed: {e}")
+        return []
+
+    picked = []
+    for event in events:
+        ed = event.get("endDate", "")
+        if not ed:
+            continue
+        try:
+            end_dt = datetime.fromisoformat(ed.replace("Z", "+00:00"))
+            if end_dt.timestamp() < now_ts:
+                continue
+        except Exception:
+            continue
+
+        sub_markets = event.get("markets", [])
+        if not sub_markets:
+            continue
+
+        # Pick the sub-market whose ltp (or bid or outcomePrices[0]) is nearest 0.5
+        def _price(m):
+            ltp = m.get("lastTradePrice")
+            if ltp is not None:
+                try:
+                    return float(ltp)
+                except Exception:
+                    pass
+            bid = m.get("bestBid")
+            if bid is not None:
+                try:
+                    return float(bid)
+                except Exception:
+                    pass
+            op = m.get("outcomePrices")
+            if op:
+                try:
+                    parsed = json.loads(op) if isinstance(op, str) else op
+                    return float(parsed[0])
+                except Exception:
+                    pass
+            return None
+
+        valid_markets = [m for m in sub_markets if _price(m) is not None and 0.001 < (_price(m) or 0) < 0.999]
+        if not valid_markets:
+            continue
+
+        best = min(valid_markets, key=lambda m: abs((_price(m) or 0.5) - 0.5))
+        picked.append(_extract_market_dict(best))
+
+    return picked
+
+
+def fetch_active_markets(max_pages: int = 15, force_refresh: bool = False) -> dict:
+    """Fetch active crypto markets from Polymarket.
+
+    Two sources are combined:
+    1. /markets/keyset sorted by startDate desc — captures today's intraday
+       (1hour, 4hour, 1day) markets.
+    2. /events?tag_slug=weekly and tag_slug=monthly — captures the weekly
+       and monthly grouped-event price-range markets that started weeks ago
+       and would never appear in the first N pages of the keyset endpoint.
+
+    For weekly/monthly events that contain many sub-markets (one per price
+    range), we pick the sub-market closest to 0.5 probability — it carries
+    the most uncertainty and the best ML signal.
+    """
     global _active_cache, _active_cache_ts
 
     now = time.time()
-    if _active_cache and (now - _active_cache_ts) < ACTIVE_CACHE_TTL:
+    if not force_refresh and _active_cache and (now - _active_cache_ts) < ACTIVE_CACHE_TTL:
         print(f"Using cached active markets (age: {int(now - _active_cache_ts)}s)")
         return _active_cache
 
-    print("Fetching active markets from Polymarket (by startDate, skipping 5min)...")
-    all_markets = []
+    print("Fetching intraday markets from Polymarket (startDate desc)...")
+    all_markets: list = []
     after_cursor = None
 
     for page in range(max_pages):
@@ -207,11 +326,11 @@ def fetch_active_markets(max_pages: int = 15) -> dict:
             break
 
         data = response.json()
-        markets = data.get("markets", [])
-        if not markets:
+        page_markets = data.get("markets", [])
+        if not page_markets:
             break
 
-        all_markets.extend(markets)
+        all_markets.extend(page_markets)
         print(f"  page {page+1}: {len(all_markets)} markets fetched")
 
         after_cursor = data.get("next_cursor")
@@ -220,14 +339,25 @@ def fetch_active_markets(max_pages: int = 15) -> dict:
 
         time.sleep(0.1)
 
-    # Pattern for 5min markets: "10:55AM-11:00AM" (range ≤ 5 minutes)
+    # Supplement with 4h/weekly/monthly events from the events API.
+    # These market types don't appear in the /markets/keyset endpoint —
+    # they're only accessible via /events?tag_slug=<slug>.
+    print("Fetching 4h events from Polymarket events API...")
+    fourhour_raw = _fetch_events_by_tag("4h", now)
+    print(f"  4h sub-markets picked: {len(fourhour_raw)}")
+
+    print("Fetching weekly events from Polymarket events API...")
+    weekly_raw = _fetch_events_by_tag("weekly", now)
+    print(f"  weekly sub-markets picked: {len(weekly_raw)}")
+
+    print("Fetching monthly events from Polymarket events API...")
+    monthly_raw = _fetch_events_by_tag("monthly", now)
+    print(f"  monthly sub-markets picked: {len(monthly_raw)}")
+
+    # Pattern for 5min/15min markets: "10:55AM-11:00AM"
     _5min_pat = re.compile(r'\d+:\d+(AM|PM)-\d+:\d+(AM|PM)', re.IGNORECASE)
 
-    def _is_5min(question: str) -> bool:
-        m = _5min_pat.search(question)
-        if not m:
-            return False
-        # Parse the two times and check if range <= 15 minutes
+    def _is_short_window(question: str) -> bool:
         full = re.search(r'(\d+):(\d+)(AM|PM)-(\d+):(\d+)(AM|PM)', question, re.IGNORECASE)
         if not full:
             return False
@@ -242,34 +372,34 @@ def fetch_active_markets(max_pages: int = 15) -> dict:
         return mins <= 15  # skip 5min and 15min markets
 
     filtered: dict = {coin: [] for coin in KEYWORDS}
-    skipped_5min = 0
-    for market in all_markets:
+    seen_ids: set = set()
+    skipped_short = 0
+
+    def _add_market(market: dict):
+        nonlocal skipped_short
         question = str(market.get("question", ""))
-        if _is_5min(question):
-            skipped_5min += 1
-            continue
+        if _is_short_window(question):
+            skipped_short += 1
+            return
+        mid = market.get("id")
+        if mid and mid in seen_ids:
+            return
+        if mid:
+            seen_ids.add(mid)
         text = (question + " " + str(market.get("slug", ""))).lower()
         for coin, keywords in KEYWORDS.items():
             if _matches_coin(text, keywords):
-                filtered[coin].append({
-                    "id": market.get("id"),
-                    "question": question,
-                    "startDate": market.get("startDate"),
-                    "endDate": market.get("endDate"),
-                    "lastTradePrice": market.get("lastTradePrice"),
-                    "bestBid": market.get("bestBid"),
-                    "bestAsk": market.get("bestAsk"),
-                    "spread": market.get("spread"),
-                    "volume": market.get("volume"),
-                    "volumeNum": market.get("volumeNum"),
-                    "liquidity": market.get("liquidity"),
-                    "outcomes": market.get("outcomes"),
-                    "outcomePrices": market.get("outcomePrices"),
-                    "clobTokenIds": market.get("clobTokenIds"),
-                })
+                filtered[coin].append(_extract_market_dict(market))
+                break
+
+    for market in all_markets:
+        _add_market(market)
+
+    for market in fourhour_raw + weekly_raw + monthly_raw:
+        _add_market(market)
 
     total = sum(len(v) for v in filtered.values())
-    print(f"  done: {total} crypto markets (skipped {skipped_5min} short-window ≤15min markets)")
+    print(f"  done: {total} crypto markets (skipped {skipped_short} ≤15min markets)")
 
     _active_cache = filtered
     _active_cache_ts = now
@@ -428,10 +558,30 @@ def enrich_markets_with_history(markets: dict, top_n: int = 20) -> dict:
                 pass
 
             def _real(p):
-                # Accept any price that has moved at all away from 0/1 extremes
-                return p is not None and 0.03 < p < 0.97
+                # Accept prices with real signal. Wider range (0.005–0.995) so
+                # weekly/monthly markets (where one range bucket trades near 0.01)
+                # are not silently dropped.
+                return p is not None and 0.005 < p < 0.995
 
-            has_real_price = _real(ltp) or _real(bid) or _real(ask) or _real(outcome_yes)
+            # For multi-outcome markets (weekly/monthly), outcomePrices is an array
+            # of prices for each bucket. Pick the one closest to 0.5 as the
+            # representative price — it has the most uncertainty and best signal.
+            best_outcome_price = None
+            try:
+                op = m.get("outcomePrices")
+                if op:
+                    parsed = json.loads(op) if isinstance(op, str) else op
+                    if parsed and len(parsed) > 1:
+                        floats = [float(x) for x in parsed]
+                        # Pick the one closest to 0.5 (most uncertain = best for ML)
+                        best_outcome_price = min(floats, key=lambda x: abs(x - 0.5))
+            except Exception:
+                pass
+
+            has_real_price = (
+                _real(ltp) or _real(bid) or _real(ask)
+                or _real(outcome_yes) or _real(best_outcome_price)
+            )
             if not has_real_price:
                 continue
 
@@ -443,7 +593,18 @@ def enrich_markets_with_history(markets: dict, top_n: int = 20) -> dict:
                     try:
                         ids = json.loads(clob_ids) if isinstance(clob_ids, str) else clob_ids
                         token_id = ids[0]
-                        history = _fetch_clob_history(token_id, start_ts, end_ts)
+                        # For "Up or Down" binary markets that just opened, the CLOB
+                        # may have very few trades. Widen the fetch window to 30min
+                        # before market start so we capture pre-market price discovery
+                        # and any early trades — gives the model a real trajectory.
+                        is_up_or_down = bool(re.search(r'up or down', m.get("question", ""), re.IGNORECASE))
+                        fetch_start = start_ts - 1800 if is_up_or_down else start_ts
+                        history = _fetch_clob_history(token_id, fetch_start, end_ts)
+
+                        # If still empty for an Up/Down market, try fetching the last
+                        # 2 hours from now — catches markets mid-session with activity
+                        if not history and is_up_or_down:
+                            history = _fetch_clob_history(token_id, now_ts - 7200, now_ts)
                     except Exception:
                         history = []
 
@@ -459,7 +620,7 @@ def enrich_markets_with_history(markets: dict, top_n: int = 20) -> dict:
 
 def run_pipeline_live(risk_level: int = 5):
     """Run the full pipeline using live Polymarket data with real CLOB history."""
-    markets = fetch_active_markets()
+    markets = fetch_active_markets(force_refresh=True)  # always fresh on optimize
     print("Enriching with CLOB price histories (active/recently-closed markets only)...")
     markets = enrich_markets_with_history(markets)
 
@@ -472,9 +633,38 @@ def run_pipeline_live(risk_level: int = 5):
 
     best_markets = {}
     for coin, coin_preds in predictions.items():
-        positive_edge = [p for p in coin_preds if p["edge"] > 0.02]
-        if positive_edge:
-            best = max(positive_edge, key=lambda x: x["edge"])
+        # Exclude monthly markets — the monthly LGBMClassifier is known to produce
+        # miscalibrated estimates even with real CLOB history. Focus on 1hour–weekly.
+        #
+        # Price filter — two-tier approach:
+        #   Ideal zone: 0.35–0.65 (maximum uncertainty, best model signal).
+        #   Acceptable zone: 0.20–0.80 (pragmatic fallback when ideal-zone markets
+        #   are absent, e.g. outside peak trading hours or when "Up or Down" markets
+        #   haven't yet accumulated enough CLOB history to produce non-zero edge).
+        #   We prefer the ideal-zone candidate when one exists, otherwise fall back
+        #   to the wider zone — this is handled by the sort key below (edge within
+        #   ideal zone is ranked higher via the "in_ideal" tiebreaker).
+        #
+        # Edges > 15% are treated as model anomalies (market is almost certainly
+        # right at that level of mispricing), not genuine opportunities.
+        eligible = [
+            p for p in coin_preds
+            if p["edge"] > 0.02
+            and p["market_type"] != "monthly"
+            and 0.20 <= p["market_price"] <= 0.80   # exclude extreme OTM / near-resolved
+            and p["edge"] <= 0.15                    # edges > 15% = model miscalibration
+        ]
+        # Debug: log what we found for this coin
+        print(f"  {coin}: {len(eligible)} eligible markets (from {len(coin_preds)} predictions)")
+        for p in eligible:
+            in_ideal = "IDEAL" if 0.35 <= p["market_price"] <= 0.65 else "wide"
+            print(f"    [{in_ideal}] price={p['market_price']:.2f} edge={p['edge']:+.3f} type={p['market_type']} | {p['question'][:60]}")
+        if eligible:
+            # Prefer ideal-zone (35-65) candidates; within each zone sort by edge desc
+            best = max(eligible, key=lambda x: (
+                1 if 0.35 <= x["market_price"] <= 0.65 else 0,  # ideal zone first
+                x["edge"]
+            ))
             best_markets[coin] = best
 
     if len(best_markets) < 2:
@@ -497,7 +687,7 @@ def run_pipeline_live(risk_level: int = 5):
     best_markets = {c: best_markets[c] for c in available_coins}
 
     allocations = optimize_portfolio(estimates, market_prices_map, correlation_matrix, risk_level)
-    return allocations, best_markets
+    return allocations, best_markets, markets
 
 
 # ── Request bodies ────────────────────────────────────────────────────────────
@@ -521,26 +711,45 @@ def optimize(req: OptimizeRequest):
             detail="No active markets with real prices right now. Polymarket trading windows run ~10:00AM-4:00PM ET on weekdays. Try again when a window is active.",
         )
 
-    allocations, best_markets = result
+    allocations, best_markets, enriched_markets = result
     coins = list(allocations.keys())
 
-    # Renormalise weights so they sum to exactly 1.0, then derive dollar amounts.
-    # This guarantees that sum(dollar_amount) == req.amount regardless of
-    # floating-point rounding inside the optimizer.
+    # Weights from the optimizer may sum to < 1.0 (cash buffer from Half-Kelly /
+    # inequality constraint).  Do NOT renormalise — the undeployed fraction is
+    # intentional: low-edge or highly correlated markets leave more in cash.
     raw_weights = np.array([allocations[c]["weight"] for c in coins], dtype=float)
+    raw_weights = np.clip(raw_weights, 0.0, None)
     total_w = raw_weights.sum()
-    if total_w > 1e-6:
-        raw_weights = raw_weights / total_w
-    else:
-        raw_weights = np.ones(len(coins)) / len(coins)
 
-    # Distribute dollars: give all remaining cents to the largest position to
-    # avoid a $0.01 rounding gap.
+    # Safety: if the optimizer somehow returns all-zero weights, fall back to
+    # equal allocation (shouldn't happen but guards against solver failures).
+    if total_w < 1e-6:
+        raw_weights = np.ones(len(coins)) / len(coins)
+        total_w = 1.0
+
+    # Cap total deployed at 100% (rounding noise can push it fractionally over).
+    if total_w > 1.0:
+        raw_weights = raw_weights / total_w
+        total_w = 1.0
+
+    # Dollar amounts: each coin gets weight * req.amount.
+    # Cash remainder = req.amount * (1 - total_w) — reported in the report.
     dollar_amounts = [round(float(w) * req.amount, 2) for w in raw_weights]
-    rounding_gap = round(req.amount - sum(dollar_amounts), 2)
-    if rounding_gap != 0:
+
+    # Absorb rounding cents into the largest position only if total deployed
+    # would otherwise exceed req.amount (never add to cash-remainder coins).
+    allocated = sum(dollar_amounts)
+    rounding_gap = round(req.amount * total_w - allocated, 2)
+    if rounding_gap != 0 and any(d > 0 for d in dollar_amounts):
         largest_idx = int(np.argmax(raw_weights))
         dollar_amounts[largest_idx] = round(dollar_amounts[largest_idx] + rounding_gap, 2)
+
+    def _confidence(edge: float) -> float:
+        # Scale edge to confidence, but cap at 0.75 — the models have known
+        # calibration issues (training on historical resolved markets) so we
+        # never claim more than 75% confidence even on large edges.
+        # Formula: softly saturates — 10% edge ≈ 33%, 20% edge ≈ 50%, 40% ≈ 67%
+        return round(min(abs(edge) / (abs(edge) + 0.2), 0.75), 3)
 
     allocation_data = {
         coin: {
@@ -549,44 +758,176 @@ def optimize(req: OptimizeRequest):
             "edge": allocations[coin]["edge"],
             "our_estimate": allocations[coin]["our_estimate"],
             "market_price": allocations[coin]["market_price"],
-            "confidence": round(min(abs(allocations[coin]["edge"]) * 5, 1.0), 3),
+            "confidence": _confidence(allocations[coin]["edge"]),
+            "market_type": best_markets[coin].get("market_type", "all"),
             "market": best_markets[coin],
         }
         for i, coin in enumerate(coins)
     }
 
-    # Build reasoning report
+    # ── Live baseline comparison ───────────────────────────────────────────────
+    # Run Logistic Regression on the same feature vectors used by our ensemble,
+    # so the frontend can display real per-run numbers (not hardcoded).
+    model_comparison = None
+    if BASELINE_MODEL is not None:
+        try:
+            coin_idx_map = {c: i for i, c in enumerate(list(MODELS.keys())[:7])}
+            our_estimates, lr_estimates, market_prices_list, coins_used = [], [], [], []
+
+            # Build a fast lookup: market_id → enriched market dict (has full price fields)
+            enriched_by_id: dict = {}
+            for coin_markets in enriched_markets.values():
+                for m in coin_markets:
+                    if m.get("id"):
+                        enriched_by_id[m["id"]] = m
+
+            for coin, d in allocation_data.items():
+                best_pred = best_markets[coin]  # prediction dict (has "id" and "question")
+                # Use the enriched market (full price fields) for feature extraction
+                market = enriched_by_id.get(best_pred.get("id"), best_pred)
+                _, market_type = get_model_for_market(market.get("question", ""), market)
+                coin_idx = coin_idx_map.get(coin, 0)
+                features_df, _ = get_price_features_with_type(market, coin_idx, market_type)
+                if features_df is None:
+                    continue
+
+                # Align columns to what the baseline was trained on.
+                # Handle both plain estimators (feature_names_in_) and Pipelines.
+                try:
+                    bl_cols = BASELINE_MODEL.feature_names_in_
+                    features_aligned = features_df.reindex(columns=bl_cols, fill_value=0)
+                except AttributeError:
+                    # Pipeline or estimator without feature_names_in_ — use raw df
+                    features_aligned = features_df
+
+                try:
+                    lr_prob = float(BASELINE_MODEL.predict_proba(features_aligned)[0][1])
+                except Exception as inner_e:
+                    print(f"  baseline predict failed for {coin}: {inner_e}")
+                    continue
+
+                our_estimates.append(d["our_estimate"])
+                lr_estimates.append(lr_prob)
+                market_prices_list.append(d["market_price"])
+                coins_used.append(coin)
+
+            print(f"Live comparison: {len(our_estimates)} coins — our={our_estimates} lr={lr_estimates}")
+
+            if our_estimates:
+                our_arr = np.array(our_estimates)
+                lr_arr  = np.array(lr_estimates)
+                mp_arr  = np.array(market_prices_list)
+
+                our_edges = our_arr - mp_arr
+                lr_edges  = lr_arr  - mp_arr
+
+                # Mean absolute edge: how far each model's estimate is from market price.
+                # Larger = more alpha found. Our advantage is positive when we find bigger edges.
+                our_mean_edge = float(np.mean(np.abs(our_edges)))
+                lr_mean_edge  = float(np.mean(np.abs(lr_edges)))
+                edge_advantage = round((our_mean_edge - lr_mean_edge) * 100, 2)
+
+                # Agreement: correlation between the two models' predictions
+                if len(our_arr) > 1:
+                    corr = float(np.corrcoef(our_arr, lr_arr)[0, 1])
+                else:
+                    corr = 1.0
+
+                model_comparison = {
+                    "our_mean_edge_pct":  round(our_mean_edge * 100, 2),
+                    "lr_mean_edge_pct":   round(lr_mean_edge * 100, 2),
+                    "edge_advantage_pct": edge_advantage,   # positive = our model finds bigger edges (more alpha)
+                    "prediction_correlation": round(corr, 3),
+                    "n_markets": len(our_estimates),
+                    "per_coin": [
+                        {
+                            "coin": coins_used[i],
+                            "our_estimate": round(our_estimates[i], 4),
+                            "lr_estimate":  round(lr_estimates[i], 4),
+                            "market_price": round(market_prices_list[i], 4),
+                            "our_edge": round(our_estimates[i] - market_prices_list[i], 4),
+                            "lr_edge":  round(lr_estimates[i]  - market_prices_list[i], 4),
+                        }
+                        for i in range(len(our_estimates))
+                    ],
+                }
+                print(f"  model_comparison built: our={model_comparison['our_mean_edge_pct']}% lr={model_comparison['lr_mean_edge_pct']}%")
+        except Exception as e:
+            import traceback
+            print(f"Live comparison failed: {e}")
+            traceback.print_exc()
+
+    # Build reasoning report — only include coins with actual dollar allocation
     sorted_by_weight = sorted(allocation_data.items(), key=lambda x: x[1]["weight"], reverse=True)
-    top_coin, top_data = sorted_by_weight[0]
+    active_positions = [(coin, d) for coin, d in sorted_by_weight if d["dollar_amount"] > 0]
+    skipped_coins = [(coin, d) for coin, d in sorted_by_weight if d["dollar_amount"] == 0]
+    top_coin, top_data = active_positions[0] if active_positions else sorted_by_weight[0]
 
     risk_label = {1:"Very Conservative",2:"Conservative",3:"Moderate",4:"Moderate+",
                   5:"Balanced",6:"Moderate Aggressive",7:"Aggressive",8:"Very Aggressive",
                   9:"High Risk",10:"Max Risk"}.get(req.risk_level, "Balanced")
 
+    # Half-Kelly: raw Kelly fraction = edge / (1 - market_price), halved before sizing.
+    # Markowitz then further shapes the split across correlated coins.
+    total_deployed_pct = sum(d["weight"] for d in allocation_data.values()) * 100
+    cash_pct = max(0.0, 100.0 - total_deployed_pct)
+    cash_dollars = round(req.amount * cash_pct / 100, 2)
+
     coin_lines = []
-    for coin, d in sorted_by_weight:
-        direction = "YES (price will go up/event will happen)" if d["our_estimate"] > d["market_price"] else "NO"
+    total_expected_gain = 0.0
+    for coin, d in active_positions:
+        # Full Kelly fraction (before halving) for display purposes
+        raw_kelly = d["edge"] / (1 - d["market_price"]) if d["market_price"] < 1 else 0
+        half_kelly = raw_kelly * 0.5
+        direction = "YES" if d["our_estimate"] > d["market_price"] else "NO"
+        horizon_label = {"1hour": "1-hour", "4hour": "4-hour", "1day": "daily", "weekly": "weekly"}.get(d.get("market_type", ""), "")
+        # Expected gain: dollar_amount * edge / market_price (payout if YES wins = 1/market_price)
+        expected_gain = d["dollar_amount"] * d["edge"] / d["market_price"] if d["market_price"] > 0 else 0
+        total_expected_gain += expected_gain
         coin_lines.append(
-            f"• {coin} ({d['weight']*100:.1f}% = ${d['dollar_amount']:.2f}): "
-            f"Market prices this at {d['market_price']*100:.1f}%, our model estimates {d['our_estimate']*100:.1f}% — "
-            f"edge of {d['edge']*100:+.1f}%. Bet {direction}. "
-            f"Confidence: {d['confidence']*100:.0f}%."
+            f"• {coin} — ${d['dollar_amount']:.2f} ({d['weight']*100:.1f}%) → est. gain ${expected_gain:+.2f}"
         )
+        coin_lines.append(
+            f"  Market price: {d['market_price']*100:.1f}% | Model estimate: {d['our_estimate']*100:.1f}% | Edge: {d['edge']*100:+.1f}%"
+        )
+        coin_lines.append(
+            f"  Full Kelly: {raw_kelly*100:.1f}% → Half-Kelly: {half_kelly*100:.1f}% → final: {d['weight']*100:.1f}% | {direction} on {horizon_label} | Confidence: {d['confidence']*100:.0f}%"
+        )
+        coin_lines.append("")
+
+    skipped_line = ""
+    if skipped_coins:
+        skipped_reasons = []
+        for c, d in skipped_coins:
+            if d["edge"] <= 0.02:
+                skipped_reasons.append(f"{c} (edge {d['edge']*100:+.1f}% below 2% threshold)")
+            else:
+                skipped_reasons.append(f"{c} (weight driven to 0 by correlation penalty)")
+        skipped_line = f"Excluded: {'; '.join(skipped_reasons)}."
+
+    expected_roi = (total_expected_gain / req.amount * 100) if req.amount > 0 else 0
+
+    cash_line = (f"Cash reserve: ${cash_dollars:.2f} ({cash_pct:.1f}%) — Half-Kelly risk buffer."
+                 if cash_pct > 0.5 else "")
 
     report_lines = [
-        f"Risk level {req.risk_level}/10 ({risk_label}): "
-        + ("Equal weight across all coins — Markowitz penalty maximised to reduce correlation risk."
-           if req.risk_level <= 2
-           else f"Kelly criterion drives concentration toward highest-edge coins, moderated by a {'strong' if req.risk_level <= 5 else 'light'} correlation penalty."),
+        f"KELLY-MARKOWITZ PORTFOLIO — Risk level {req.risk_level}/10 ({risk_label})",
         "",
-        f"Selected {len(coins)} coin{'s' if len(coins)>1 else ''} with positive model edge out of 7 tracked.",
+        "━━━ This Run ━━━",
+        f"Markets with positive edge found: {len(active_positions)} of 7 tracked coins.",
+        *(([skipped_line, ""]) if skipped_line else []),
+        *(([cash_line, ""]) if cash_line else []),
+        "Position breakdown:",
         "",
-        "Allocation breakdown:",
         *coin_lines,
+        f"EXPECTED GAIN  ${total_expected_gain:+.2f}  ({expected_roi:+.1f}% on ${req.amount:.0f} deployed)",
         "",
-        f"Largest position: {top_coin} at {top_data['weight']*100:.1f}% — highest Kelly-weighted return given its edge ({top_data['edge']*100:+.1f}%) and correlation with the other positions.",
-        "",
-        "Correlation: highly correlated coins (BTC/ETH/SOL typically move together) are diversified away from each other at lower risk levels. At higher risk, the optimizer concentrates on whichever coin shows the strongest individual edge regardless of correlation.",
+        "━━━ Key Driver ━━━",
+        f"{top_coin} received the largest position ({top_data['weight']*100:.1f}%) because it has the highest",
+        f"Half-Kelly-weighted edge ({top_data['edge']*100:+.1f}%) relative to its correlation with the other selected coins.",
+        ("At this risk level, the optimizer concentrates into the top edge regardless of correlation."
+         if req.risk_level >= 7
+         else "At this risk level, the optimizer diversifies: high correlation between coins is penalised, so even a slightly lower-edge coin may receive significant weight if it moves independently."),
     ]
 
     return {
@@ -595,17 +936,22 @@ def optimize(req: OptimizeRequest):
         "amount": req.amount,
         "allocations": allocation_data,
         "report": "\n".join(report_lines),
+        "model_comparison": model_comparison,
     }
 
 
 @app.get("/api/markets")
 def get_markets():
     markets = fetch_active_markets()
+    markets = enrich_markets_with_history(markets)
     predictions = predict_probabilities(markets)
 
     result = []
     for coin, preds in predictions.items():
         for p in preds:
+            # Skip short-window markets from the display table
+            if p["market_type"] in ("5min", "15min"):
+                continue
             result.append({
                 "coin": coin,
                 "id": p["id"],
@@ -616,7 +962,7 @@ def get_markets():
                 "our_estimate": p["our_estimate"],
                 "edge": p["edge"],
                 "volume": p["volume"],
-                "confidence": round(min(abs(p["edge"]) * 5, 1.0), 3),
+                "confidence": round(min(abs(p["edge"]) / (abs(p["edge"]) + 0.2), 0.75), 3),
             })
 
     result.sort(key=lambda x: x["edge"], reverse=True)
@@ -626,6 +972,7 @@ def get_markets():
 @app.get("/api/dashboard")
 def get_dashboard():
     markets = fetch_active_markets()
+    markets = enrich_markets_with_history(markets)
     predictions = predict_probabilities(markets)
 
     all_preds = [p for preds in predictions.values() for p in preds]

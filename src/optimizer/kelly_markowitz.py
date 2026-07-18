@@ -1,6 +1,15 @@
 import numpy as np
 from scipy.optimize import minimize
 
+# Fractional Kelly multiplier.
+# Full Kelly (1.0) is optimal in theory but is extremely sensitive to model
+# mis-calibration — a single overconfident estimate (e.g. 92.9% ETH) will
+# concentrate the entire portfolio.  Half-Kelly (0.5) is the industry standard
+# for prediction markets; it cuts drawdowns roughly in half while sacrificing
+# only ~15% of long-run growth rate.
+KELLY_FRACTION = 0.5
+
+
 def optimize_portfolio(estimates: dict, market_prices: dict, correlation_matrix: np.ndarray, risk_level: int) -> dict:
     """
     Kelly-Markowitz portfolio optimizer for binary prediction markets.
@@ -10,16 +19,30 @@ def optimize_portfolio(estimates: dict, market_prices: dict, correlation_matrix:
     correlation_matrix: NxN numpy array of return correlations
     risk_level: 1-10 (1=conservative/diversified, 10=aggressive/concentrated)
 
-    Objective: maximise Kelly expected log-growth minus a Markowitz variance penalty.
-    The Markowitz term penalises putting large weights on correlated coins.
-    Risk level scales the variance penalty: high risk → small penalty (allow concentration),
-    low risk → large penalty (force diversification away from correlated positions).
+    Objective: maximise fractional-Kelly expected log-growth minus a Markowitz
+    variance penalty.  The Markowitz term penalises putting large weights on
+    correlated coins.  Risk level scales the variance penalty: high risk →
+    small penalty (allow concentration), low risk → large penalty (force
+    diversification away from correlated positions).
+
+    The sum constraint is an inequality (≤ 1.0) so the optimizer may leave
+    capital in cash when edges are compressed or model confidence is low.
+    The undeployed fraction acts as a natural risk buffer.
     """
     coins = list(estimates.keys())
     n = len(coins)
 
     # Edge per coin
     edges = np.array([estimates[c] - market_prices[c] for c in coins])
+
+    # Raw Kelly fraction per coin: f*_i = edge_i / (1 - market_price_i)
+    # Scaled by KELLY_FRACTION (Half-Kelly by default) so the maximum each
+    # coin can claim from the full bankroll is clipped well below 1.0.
+    kelly_fracs = np.array([
+        KELLY_FRACTION * (edges[i] / max(1.0 - market_prices[c], 1e-6))
+        for i, c in enumerate(coins)
+    ])
+    kelly_fracs = np.clip(kelly_fracs, 0.0, 1.0)
 
     # Kelly expected log-growth per unit weight for each coin:
     #   g_i = p_i * log(1 + e_i) + (1 - p_i) * log(1 - e_i)
@@ -42,25 +65,31 @@ def optimize_portfolio(estimates: dict, market_prices: dict, correlation_matrix:
         markowitz_penalty = lambda_var * (weights @ correlation_matrix @ weights)
         return -(kelly_gain - markowitz_penalty)  # minimise negative
 
-    # Per-coin concentration cap based on risk level alone — independent of edge size
-    #   risk=1  → max 1/n per coin (forced equal-weight)
-    #   risk=10 → max 1.0 (unconstrained)
-    # Quadratic ramp so mid-levels feel meaningfully different
+    # Per-coin upper bound: the smaller of the fractional-Kelly fraction and
+    # the risk-level concentration cap.  This means:
+    #   • Low-edge markets naturally get a smaller budget even at high risk.
+    #   • Low risk levels still force diversification via max_single.
     risk_frac = ((risk_level - 1) / 9.0) ** 0.7   # 0 → 1, convex
-    max_single = (1.0 / n) + risk_frac * (1.0 - 1.0 / n)
+    max_single_risk = (1.0 / n) + risk_frac * (1.0 - 1.0 / n)
 
-    bounds = [(0.0, max_single) for _ in range(n)]
+    # Per-coin bound = min(Half-Kelly fraction, risk-level cap)
+    upper_bounds = np.minimum(kelly_fracs, max_single_risk)
+    # Ensure upper bound is always strictly positive so the solver has room
+    upper_bounds = np.maximum(upper_bounds, 1e-4)
+
+    bounds = [(0.0, float(upper_bounds[i])) for i in range(n)]
 
     constraints = [
-        # All capital deployed
-        {"type": "eq", "fun": lambda w: w.sum() - 1.0},
+        # Capital deployed must not exceed 100%; may be less (cash buffer)
+        {"type": "ineq", "fun": lambda w: 1.0 - w.sum()},
     ]
 
-    # Warm start: edge-proportional, clipped to bounds
-    x0 = np.maximum(edges, 1e-9)
-    x0 = x0 / x0.sum()
-    x0 = np.clip(x0, 0.0, max_single)
-    x0 = x0 / x0.sum()
+    # Warm start: Kelly-proportional, clipped to per-coin bounds
+    x0 = np.copy(kelly_fracs)
+    x0 = np.clip(x0, 0.0, upper_bounds)
+    # Scale down if total exceeds 1 (will often happen; optimizer decides final split)
+    if x0.sum() > 1.0:
+        x0 = x0 / x0.sum()
 
     result = minimize(
         objective,
@@ -72,15 +101,15 @@ def optimize_portfolio(estimates: dict, market_prices: dict, correlation_matrix:
     )
 
     if not result.success:
-        # Fallback: edge-proportional, capped at max_single
-        pos_edges = np.maximum(edges, 1e-9)
-        weights = pos_edges / pos_edges.sum()
-        weights = np.clip(weights, 0.0, max_single)
-        weights = weights / weights.sum()
+        # Fallback: Kelly-proportional, each coin capped at its upper bound
+        weights = np.copy(kelly_fracs)
+        weights = np.clip(weights, 0.0, upper_bounds)
+        if weights.sum() > 1.0:
+            weights = weights / weights.sum()
     else:
         weights = np.maximum(result.x, 0.0)
-        s = weights.sum()
-        weights = weights / s if s > 1e-6 else np.ones(n) / n
+        # Do NOT renormalise — the inequality constraint intentionally allows
+        # sum < 1.0.  The remaining fraction stays as cash.
 
     allocations = {}
     for i, coin in enumerate(coins):
@@ -108,5 +137,7 @@ if __name__ == "__main__":
     for risk_level in [2, 5, 8]:
         print(f"\nrisk level {risk_level}:")
         result = optimize_portfolio(estimates, market_prices, correlation_matrix, risk_level)
+        total = sum(d["weight"] for d in result.values())
+        print(f"  total deployed: {total*100:.1f}%  (cash: {(1-total)*100:.1f}%)")
         for coin, data in result.items():
             print(f"  {coin}: {data['weight']*100:.1f}% | edge: {data['edge']:.2f}")
