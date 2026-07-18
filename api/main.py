@@ -160,9 +160,10 @@ _active_cache_ts: float = 0.0
 ACTIVE_CACHE_TTL = 60  # 1 minute — refresh often during live trading
 
 
-def fetch_active_markets(max_pages: int = 3) -> dict:
-    """Fetch crypto markets sorted by volume — surfaces markets with real price action.
-    Used for the optimizer. fetch_live_markets() (sorted by startDate) is for data collection."""
+def fetch_active_markets(max_pages: int = 15) -> dict:
+    """Fetch today's crypto markets sorted by startDate (newest first).
+    Skips 5min markets — focuses on 1hour, 4hour, 1day, weekly, monthly markets
+    which have real price action and are what our model was trained on."""
     global _active_cache, _active_cache_ts
 
     now = time.time()
@@ -170,14 +171,14 @@ def fetch_active_markets(max_pages: int = 3) -> dict:
         print(f"Using cached active markets (age: {int(now - _active_cache_ts)}s)")
         return _active_cache
 
-    print("Fetching active markets from Polymarket (by volume)...")
+    print("Fetching active markets from Polymarket (by startDate, skipping 5min)...")
     all_markets = []
     after_cursor = None
 
     for page in range(max_pages):
         params = {
             "limit": 100,
-            "order": "volume",
+            "order": "startDate",
             "ascending": "false",
             "active": "true",
             "closed": "false",
@@ -219,16 +220,40 @@ def fetch_active_markets(max_pages: int = 3) -> dict:
 
         time.sleep(0.1)
 
+    # Pattern for 5min markets: "10:55AM-11:00AM" (range ≤ 5 minutes)
+    _5min_pat = re.compile(r'\d+:\d+(AM|PM)-\d+:\d+(AM|PM)', re.IGNORECASE)
+
+    def _is_5min(question: str) -> bool:
+        m = _5min_pat.search(question)
+        if not m:
+            return False
+        # Parse the two times and check if range <= 15 minutes
+        full = re.search(r'(\d+):(\d+)(AM|PM)-(\d+):(\d+)(AM|PM)', question, re.IGNORECASE)
+        if not full:
+            return False
+        h1, m1, p1 = int(full.group(1)), int(full.group(2)), full.group(3).upper()
+        h2, m2, p2 = int(full.group(4)), int(full.group(5)), full.group(6).upper()
+        if p1 == "PM" and h1 != 12: h1 += 12
+        if p1 == "AM" and h1 == 12: h1 = 0
+        if p2 == "PM" and h2 != 12: h2 += 12
+        if p2 == "AM" and h2 == 12: h2 = 0
+        mins = (h2 * 60 + m2) - (h1 * 60 + m1)
+        if mins <= 0: mins += 24 * 60
+        return mins <= 15  # skip 5min and 15min markets
+
     filtered: dict = {coin: [] for coin in KEYWORDS}
+    skipped_5min = 0
     for market in all_markets:
-        text = (
-            str(market.get("question", "")) + " " + str(market.get("slug", ""))
-        ).lower()
+        question = str(market.get("question", ""))
+        if _is_5min(question):
+            skipped_5min += 1
+            continue
+        text = (question + " " + str(market.get("slug", ""))).lower()
         for coin, keywords in KEYWORDS.items():
             if _matches_coin(text, keywords):
                 filtered[coin].append({
                     "id": market.get("id"),
-                    "question": market.get("question"),
+                    "question": question,
                     "startDate": market.get("startDate"),
                     "endDate": market.get("endDate"),
                     "lastTradePrice": market.get("lastTradePrice"),
@@ -244,7 +269,7 @@ def fetch_active_markets(max_pages: int = 3) -> dict:
                 })
 
     total = sum(len(v) for v in filtered.values())
-    print(f"  done: {total} crypto markets with real volume")
+    print(f"  done: {total} crypto markets (skipped {skipped_5min} short-window ≤15min markets)")
 
     _active_cache = filtered
     _active_cache_ts = now
@@ -403,8 +428,8 @@ def enrich_markets_with_history(markets: dict, top_n: int = 20) -> dict:
                 pass
 
             def _real(p):
-                # A "real" price has traded away from the 0.5 default and from 0/1
-                return p is not None and 0.03 < p < 0.97 and abs(p - 0.5) > 0.01
+                # Accept any price that has moved at all away from 0/1 extremes
+                return p is not None and 0.03 < p < 0.97
 
             has_real_price = _real(ltp) or _real(bid) or _real(ask) or _real(outcome_yes)
             if not has_real_price:
