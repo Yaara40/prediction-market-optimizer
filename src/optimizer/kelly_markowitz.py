@@ -1,13 +1,26 @@
 import numpy as np
 from scipy.optimize import minimize
 
-# Fractional Kelly multiplier.
-# Full Kelly (1.0) is optimal in theory but is extremely sensitive to model
-# mis-calibration — a single overconfident estimate (e.g. 92.9% ETH) will
-# concentrate the entire portfolio.  Half-Kelly (0.5) is the industry standard
-# for prediction markets; it cuts drawdowns roughly in half while sacrificing
-# only ~15% of long-run growth rate.
+# Default fractional Kelly multiplier (used by backtest and non-risk-level callers).
 KELLY_FRACTION = 0.5
+
+
+def kelly_fraction_for_risk(risk_level: int) -> float:
+    """
+    Map risk level (1-10) to a Kelly fraction:
+      1-3  → Quarter-Kelly (0.25)  — conservative, low variance
+      4-6  → Half-Kelly    (0.50)  — balanced, industry standard
+      7-8  → Three-quarter (0.75)  — aggressive
+      9-10 → Full-Kelly    (1.00)  — maximum growth, high variance
+    """
+    if risk_level <= 3:
+        return 0.25
+    elif risk_level <= 6:
+        return 0.50
+    elif risk_level <= 8:
+        return 0.75
+    else:
+        return 1.00
 
 
 def optimize_portfolio(estimates: dict, market_prices: dict, correlation_matrix: np.ndarray, risk_level: int) -> dict:
@@ -32,14 +45,17 @@ def optimize_portfolio(estimates: dict, market_prices: dict, correlation_matrix:
     coins = list(estimates.keys())
     n = len(coins)
 
+    # Kelly fraction scales with risk level
+    kf = kelly_fraction_for_risk(risk_level)
+
     # Edge per coin
     edges = np.array([estimates[c] - market_prices[c] for c in coins])
 
     # Raw Kelly fraction per coin: f*_i = edge_i / (1 - market_price_i)
-    # Scaled by KELLY_FRACTION (Half-Kelly by default) so the maximum each
-    # coin can claim from the full bankroll is clipped well below 1.0.
+    # Scaled by kf so the maximum each coin can claim from the bankroll
+    # scales with the user's chosen risk level.
     kelly_fracs = np.array([
-        KELLY_FRACTION * (edges[i] / max(1.0 - market_prices[c], 1e-6))
+        kf * (edges[i] / max(1.0 - market_prices[c], 1e-6))
         for i, c in enumerate(coins)
     ])
     kelly_fracs = np.clip(kelly_fracs, 0.0, 1.0)

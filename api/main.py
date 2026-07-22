@@ -25,7 +25,7 @@ from src.optimizer.pipeline import (
     get_model_for_market,
 )
 from src.data.coingecko import get_correlation_matrix
-from src.optimizer.kelly_markowitz import optimize_portfolio
+from src.optimizer.kelly_markowitz import optimize_portfolio, kelly_fraction_for_risk
 
 app = FastAPI(title="Prediction Market Optimizer API", version="1.0.0")
 
@@ -339,9 +339,10 @@ def fetch_active_markets(max_pages: int = 15, force_refresh: bool = False) -> di
 
         time.sleep(0.1)
 
-    # Supplement with 4h/weekly/monthly events from the events API.
+    # Supplement with 4h/weekly events from the events API.
     # These market types don't appear in the /markets/keyset endpoint —
     # they're only accessible via /events?tag_slug=<slug>.
+    # Monthly markets are excluded — the monthly model is poorly calibrated.
     print("Fetching 4h events from Polymarket events API...")
     fourhour_raw = _fetch_events_by_tag("4h", now)
     print(f"  4h sub-markets picked: {len(fourhour_raw)}")
@@ -349,10 +350,6 @@ def fetch_active_markets(max_pages: int = 15, force_refresh: bool = False) -> di
     print("Fetching weekly events from Polymarket events API...")
     weekly_raw = _fetch_events_by_tag("weekly", now)
     print(f"  weekly sub-markets picked: {len(weekly_raw)}")
-
-    print("Fetching monthly events from Polymarket events API...")
-    monthly_raw = _fetch_events_by_tag("monthly", now)
-    print(f"  monthly sub-markets picked: {len(monthly_raw)}")
 
     # Pattern for 5min/15min markets: "10:55AM-11:00AM"
     _5min_pat = re.compile(r'\d+:\d+(AM|PM)-\d+:\d+(AM|PM)', re.IGNORECASE)
@@ -395,7 +392,7 @@ def fetch_active_markets(max_pages: int = 15, force_refresh: bool = False) -> di
     for market in all_markets:
         _add_market(market)
 
-    for market in fourhour_raw + weekly_raw + monthly_raw:
+    for market in fourhour_raw + weekly_raw:
         _add_market(market)
 
     total = sum(len(v) for v in filtered.values())
@@ -619,7 +616,14 @@ def enrich_markets_with_history(markets: dict, top_n: int = 20) -> dict:
 
 
 def run_pipeline_live(risk_level: int = 5):
-    """Run the full pipeline using live Polymarket data with real CLOB history."""
+    """Run the full pipeline using live Polymarket data with real CLOB history.
+
+    Each eligible (coin, market) pair is treated as a separate optimizer asset,
+    keyed as "COIN|TYPE" (e.g. "BTC|1hour").  Multiple high-edge markets for the
+    same coin are all passed through — the Markowitz penalty handles correlation
+    between them (same-coin markets get correlation=0.95; cross-coin pairs use
+    the CoinGecko price correlation).
+    """
     markets = fetch_active_markets(force_refresh=True)  # always fresh on optimize
     print("Enriching with CLOB price histories (active/recently-closed markets only)...")
     markets = enrich_markets_with_history(markets)
@@ -631,22 +635,10 @@ def run_pipeline_live(risk_level: int = 5):
 
     predictions = predict_probabilities(markets)
 
-    best_markets = {}
+    # Collect ALL eligible markets across all coins as (asset_key, prediction, coin) tuples.
+    # asset_key = "COIN|TYPE" so same coin + different timeframe → two distinct assets.
+    all_eligible: list[tuple[str, dict, str]] = []
     for coin, coin_preds in predictions.items():
-        # Exclude monthly markets — the monthly LGBMClassifier is known to produce
-        # miscalibrated estimates even with real CLOB history. Focus on 1hour–weekly.
-        #
-        # Price filter — two-tier approach:
-        #   Ideal zone: 0.35–0.65 (maximum uncertainty, best model signal).
-        #   Acceptable zone: 0.20–0.80 (pragmatic fallback when ideal-zone markets
-        #   are absent, e.g. outside peak trading hours or when "Up or Down" markets
-        #   haven't yet accumulated enough CLOB history to produce non-zero edge).
-        #   We prefer the ideal-zone candidate when one exists, otherwise fall back
-        #   to the wider zone — this is handled by the sort key below (edge within
-        #   ideal zone is ranked higher via the "in_ideal" tiebreaker).
-        #
-        # Edges > 15% are treated as model anomalies (market is almost certainly
-        # right at that level of mispricing), not genuine opportunities.
         eligible = [
             p for p in coin_preds
             if p["edge"] > 0.02
@@ -654,39 +646,57 @@ def run_pipeline_live(risk_level: int = 5):
             and 0.20 <= p["market_price"] <= 0.80   # exclude extreme OTM / near-resolved
             and p["edge"] <= 0.15                    # edges > 15% = model miscalibration
         ]
-        # Debug: log what we found for this coin
         print(f"  {coin}: {len(eligible)} eligible markets (from {len(coin_preds)} predictions)")
         for p in eligible:
             in_ideal = "IDEAL" if 0.35 <= p["market_price"] <= 0.65 else "wide"
             print(f"    [{in_ideal}] price={p['market_price']:.2f} edge={p['edge']:+.3f} type={p['market_type']} | {p['question'][:60]}")
-        if eligible:
-            # Prefer ideal-zone (35-65) candidates; within each zone sort by edge desc
-            best = max(eligible, key=lambda x: (
-                1 if 0.35 <= x["market_price"] <= 0.65 else 0,  # ideal zone first
-                x["edge"]
-            ))
-            best_markets[coin] = best
+            key = f"{coin}|{p['market_type']}"
+            all_eligible.append((key, p, coin))
 
-    if len(best_markets) < 2:
-        print(f"Only {len(best_markets)} coin(s) with positive edge — need at least 2.")
+    if len(all_eligible) < 2:
+        print(f"Only {len(all_eligible)} eligible market(s) found — need at least 2.")
         return None
 
-    estimates = {coin: data["our_estimate"] for coin, data in best_markets.items()}
-    market_prices_map = {coin: data["market_price"] for coin, data in best_markets.items()}
+    # Deduplicate: if two predictions share the same key, keep the one with higher edge
+    seen: dict[str, tuple[dict, str]] = {}
+    for key, pred, coin in all_eligible:
+        if key not in seen or pred["edge"] > seen[key][0]["edge"]:
+            seen[key] = (pred, coin)
 
+    asset_keys = list(seen.keys())
+    asset_preds = {k: seen[k][0] for k in asset_keys}
+    asset_coins = {k: seen[k][1] for k in asset_keys}
+
+    estimates = {k: asset_preds[k]["our_estimate"] for k in asset_keys}
+    market_prices_map = {k: asset_preds[k]["market_price"] for k in asset_keys}
+
+    # Build correlation matrix for (coin, market) assets:
+    #   • Same coin, different timeframe → 0.95 (highly correlated outcomes)
+    #   • Different coins               → use CoinGecko price correlation
     full_corr, corr_coins = get_correlation_matrix()
-
-    available_coins = [c for c in best_markets.keys() if c in corr_coins]
-    if len(available_coins) < 2:
-        return None
-
-    indices = [corr_coins.index(c) for c in available_coins]
-    correlation_matrix = full_corr[np.ix_(indices, indices)]
-    estimates = {c: estimates[c] for c in available_coins}
-    market_prices_map = {c: market_prices_map[c] for c in available_coins}
-    best_markets = {c: best_markets[c] for c in available_coins}
+    n = len(asset_keys)
+    correlation_matrix = np.eye(n)
+    for i, ki in enumerate(asset_keys):
+        for j, kj in enumerate(asset_keys):
+            if i == j:
+                continue
+            ci, cj = asset_coins[ki], asset_coins[kj]
+            if ci == cj:
+                correlation_matrix[i, j] = 0.95
+            elif ci in corr_coins and cj in corr_coins:
+                ii, jj = corr_coins.index(ci), corr_coins.index(cj)
+                correlation_matrix[i, j] = full_corr[ii, jj]
+            else:
+                correlation_matrix[i, j] = 0.5  # conservative default
 
     allocations = optimize_portfolio(estimates, market_prices_map, correlation_matrix, risk_level)
+
+    # best_markets keyed by asset_key for the endpoint to use
+    best_markets = {k: asset_preds[k] for k in asset_keys}
+    # Attach the parent coin to each prediction entry
+    for k in asset_keys:
+        best_markets[k]["_coin"] = asset_coins[k]
+
     return allocations, best_markets, markets
 
 
@@ -712,19 +722,20 @@ def optimize(req: OptimizeRequest):
         )
 
     allocations, best_markets, enriched_markets = result
-    coins = list(allocations.keys())
+    # asset_keys are "COIN|TYPE" strings (e.g. "BTC|1hour", "BTC|4hour")
+    asset_keys = list(allocations.keys())
 
     # Weights from the optimizer may sum to < 1.0 (cash buffer from Half-Kelly /
     # inequality constraint).  Do NOT renormalise — the undeployed fraction is
     # intentional: low-edge or highly correlated markets leave more in cash.
-    raw_weights = np.array([allocations[c]["weight"] for c in coins], dtype=float)
+    raw_weights = np.array([allocations[k]["weight"] for k in asset_keys], dtype=float)
     raw_weights = np.clip(raw_weights, 0.0, None)
     total_w = raw_weights.sum()
 
     # Safety: if the optimizer somehow returns all-zero weights, fall back to
     # equal allocation (shouldn't happen but guards against solver failures).
     if total_w < 1e-6:
-        raw_weights = np.ones(len(coins)) / len(coins)
+        raw_weights = np.ones(len(asset_keys)) / len(asset_keys)
         total_w = 1.0
 
     # Cap total deployed at 100% (rounding noise can push it fractionally over).
@@ -732,7 +743,7 @@ def optimize(req: OptimizeRequest):
         raw_weights = raw_weights / total_w
         total_w = 1.0
 
-    # Dollar amounts: each coin gets weight * req.amount.
+    # Dollar amounts: each asset gets weight * req.amount.
     # Cash remainder = req.amount * (1 - total_w) — reported in the report.
     dollar_amounts = [round(float(w) * req.amount, 2) for w in raw_weights]
 
@@ -751,19 +762,25 @@ def optimize(req: OptimizeRequest):
         # Formula: softly saturates — 10% edge ≈ 33%, 20% edge ≈ 50%, 40% ≈ 67%
         return round(min(abs(edge) / (abs(edge) + 0.2), 0.75), 3)
 
+    # allocation_data is keyed by asset_key ("COIN|TYPE") for internal use;
+    # the frontend receives this and uses _coin for display grouping.
     allocation_data = {
-        coin: {
+        key: {
             "weight": round(float(raw_weights[i]), 4),
             "dollar_amount": dollar_amounts[i],
-            "edge": allocations[coin]["edge"],
-            "our_estimate": allocations[coin]["our_estimate"],
-            "market_price": allocations[coin]["market_price"],
-            "confidence": _confidence(allocations[coin]["edge"]),
-            "market_type": best_markets[coin].get("market_type", "all"),
-            "market": best_markets[coin],
+            "edge": allocations[key]["edge"],
+            "our_estimate": allocations[key]["our_estimate"],
+            "market_price": allocations[key]["market_price"],
+            "confidence": _confidence(allocations[key]["edge"]),
+            "market_type": best_markets[key].get("market_type", "all"),
+            "coin": best_markets[key].get("_coin", key.split("|")[0]),
+            "market": {k: v for k, v in best_markets[key].items() if k != "_coin"},
         }
-        for i, coin in enumerate(coins)
+        for i, key in enumerate(asset_keys)
     }
+
+    # coins list for response — unique coins that have at least one allocation
+    coins = sorted({d["coin"] for d in allocation_data.values()})
 
     # ── Live baseline comparison ───────────────────────────────────────────────
     # Run Logistic Regression on the same feature vectors used by our ensemble,
@@ -781,12 +798,13 @@ def optimize(req: OptimizeRequest):
                     if m.get("id"):
                         enriched_by_id[m["id"]] = m
 
-            for coin, d in allocation_data.items():
-                best_pred = best_markets[coin]  # prediction dict (has "id" and "question")
+            for key, d in allocation_data.items():
+                best_pred = best_markets[key]  # prediction dict (has "id" and "question")
                 # Use the enriched market (full price fields) for feature extraction
                 market = enriched_by_id.get(best_pred.get("id"), best_pred)
                 _, market_type = get_model_for_market(market.get("question", ""), market)
-                coin_idx = coin_idx_map.get(coin, 0)
+                asset_coin = d["coin"]
+                coin_idx = coin_idx_map.get(asset_coin, 0)
                 features_df, _ = get_price_features_with_type(market, coin_idx, market_type)
                 if features_df is None:
                     continue
@@ -803,28 +821,30 @@ def optimize(req: OptimizeRequest):
                 try:
                     lr_prob = float(BASELINE_MODEL.predict_proba(features_aligned)[0][1])
                 except Exception as inner_e:
-                    print(f"  baseline predict failed for {coin}: {inner_e}")
+                    print(f"  baseline predict failed for {key}: {inner_e}")
                     continue
 
                 our_estimates.append(d["our_estimate"])
                 lr_estimates.append(lr_prob)
                 market_prices_list.append(d["market_price"])
-                coins_used.append(coin)
+                coins_used.append(d["coin"])
 
-            print(f"Live comparison: {len(our_estimates)} coins — our={our_estimates} lr={lr_estimates}")
+            print(f"Live comparison: {len(our_estimates)} assets — our={our_estimates} lr={lr_estimates}")
 
             if our_estimates:
                 our_arr = np.array(our_estimates)
                 lr_arr  = np.array(lr_estimates)
                 mp_arr  = np.array(market_prices_list)
 
-                our_edges = our_arr - mp_arr
-                lr_edges  = lr_arr  - mp_arr
+                our_edges = our_arr - mp_arr  # always positive (we filtered for edge > 0.02)
+                lr_edges  = lr_arr  - mp_arr  # may be negative (LR disagrees with our direction)
 
-                # Mean absolute edge: how far each model's estimate is from market price.
-                # Larger = more alpha found. Our advantage is positive when we find bigger edges.
-                our_mean_edge = float(np.mean(np.abs(our_edges)))
-                lr_mean_edge  = float(np.mean(np.abs(lr_edges)))
+                # Use signed mean edge — our model's edges are always positive here because
+                # we only include markets where we found positive edge. The LR's signed edge
+                # on the same markets shows how much it agrees. Positive advantage means
+                # our model sees more alpha on these markets than LR does.
+                our_mean_edge = float(np.mean(our_edges))
+                lr_mean_edge  = float(np.mean(lr_edges))
                 edge_advantage = round((our_mean_edge - lr_mean_edge) * 100, 2)
 
                 # Agreement: correlation between the two models' predictions
@@ -836,7 +856,7 @@ def optimize(req: OptimizeRequest):
                 model_comparison = {
                     "our_mean_edge_pct":  round(our_mean_edge * 100, 2),
                     "lr_mean_edge_pct":   round(lr_mean_edge * 100, 2),
-                    "edge_advantage_pct": edge_advantage,   # positive = our model finds bigger edges (more alpha)
+                    "edge_advantage_pct": edge_advantage,   # positive = our model sees bigger edge than LR on the same markets
                     "prediction_correlation": round(corr, 3),
                     "n_markets": len(our_estimates),
                     "per_coin": [
@@ -857,64 +877,66 @@ def optimize(req: OptimizeRequest):
             print(f"Live comparison failed: {e}")
             traceback.print_exc()
 
-    # Build reasoning report — only include coins with actual dollar allocation
+    # Build reasoning report — only include assets with actual dollar allocation
     sorted_by_weight = sorted(allocation_data.items(), key=lambda x: x[1]["weight"], reverse=True)
-    active_positions = [(coin, d) for coin, d in sorted_by_weight if d["dollar_amount"] > 0]
-    skipped_coins = [(coin, d) for coin, d in sorted_by_weight if d["dollar_amount"] == 0]
-    top_coin, top_data = active_positions[0] if active_positions else sorted_by_weight[0]
+    active_positions = [(key, d) for key, d in sorted_by_weight if d["dollar_amount"] > 0]
+    skipped_positions = [(key, d) for key, d in sorted_by_weight if d["dollar_amount"] == 0]
+    top_key, top_data = active_positions[0] if active_positions else sorted_by_weight[0]
 
     risk_label = {1:"Very Conservative",2:"Conservative",3:"Moderate",4:"Moderate+",
                   5:"Balanced",6:"Moderate Aggressive",7:"Aggressive",8:"Very Aggressive",
                   9:"High Risk",10:"Max Risk"}.get(req.risk_level, "Balanced")
 
-    # Half-Kelly: raw Kelly fraction = edge / (1 - market_price), halved before sizing.
-    # Markowitz then further shapes the split across correlated coins.
+    # Kelly fraction scales with risk level; Markowitz shapes the split across correlated assets.
+    kf = kelly_fraction_for_risk(req.risk_level)
+    kelly_label = {0.25: "Quarter-Kelly", 0.50: "Half-Kelly", 0.75: "¾-Kelly", 1.00: "Full-Kelly"}.get(kf, f"{kf}×-Kelly")
     total_deployed_pct = sum(d["weight"] for d in allocation_data.values()) * 100
     cash_pct = max(0.0, 100.0 - total_deployed_pct)
     cash_dollars = round(req.amount * cash_pct / 100, 2)
 
     coin_lines = []
     total_expected_gain = 0.0
-    for coin, d in active_positions:
-        # Full Kelly fraction (before halving) for display purposes
+    for key, d in active_positions:
         raw_kelly = d["edge"] / (1 - d["market_price"]) if d["market_price"] < 1 else 0
-        half_kelly = raw_kelly * 0.5
+        scaled_kelly = raw_kelly * kf
         direction = "YES" if d["our_estimate"] > d["market_price"] else "NO"
         horizon_label = {"1hour": "1-hour", "4hour": "4-hour", "1day": "daily", "weekly": "weekly"}.get(d.get("market_type", ""), "")
-        # Expected gain: dollar_amount * edge / market_price (payout if YES wins = 1/market_price)
         expected_gain = d["dollar_amount"] * d["edge"] / d["market_price"] if d["market_price"] > 0 else 0
         total_expected_gain += expected_gain
+        display_label = f"{d['coin']} ({horizon_label})" if horizon_label else d["coin"]
         coin_lines.append(
-            f"• {coin} — ${d['dollar_amount']:.2f} ({d['weight']*100:.1f}%) → est. gain ${expected_gain:+.2f}"
+            f"• {display_label} — ${d['dollar_amount']:.2f} ({d['weight']*100:.1f}%) → est. gain ${expected_gain:+.2f}"
         )
         coin_lines.append(
             f"  Market price: {d['market_price']*100:.1f}% | Model estimate: {d['our_estimate']*100:.1f}% | Edge: {d['edge']*100:+.1f}%"
         )
         coin_lines.append(
-            f"  Full Kelly: {raw_kelly*100:.1f}% → Half-Kelly: {half_kelly*100:.1f}% → final: {d['weight']*100:.1f}% | {direction} on {horizon_label} | Confidence: {d['confidence']*100:.0f}%"
+            f"  Full Kelly: {raw_kelly*100:.1f}% → {kelly_label}: {scaled_kelly*100:.1f}% → final: {d['weight']*100:.1f}% | {direction} | Confidence: {d['confidence']*100:.0f}%"
         )
         coin_lines.append("")
 
     skipped_line = ""
-    if skipped_coins:
+    if skipped_positions:
         skipped_reasons = []
-        for c, d in skipped_coins:
+        for k, d in skipped_positions:
+            label = f"{d['coin']} ({d.get('market_type', '')})"
             if d["edge"] <= 0.02:
-                skipped_reasons.append(f"{c} (edge {d['edge']*100:+.1f}% below 2% threshold)")
+                skipped_reasons.append(f"{label} (edge {d['edge']*100:+.1f}% below 2% threshold)")
             else:
-                skipped_reasons.append(f"{c} (weight driven to 0 by correlation penalty)")
+                skipped_reasons.append(f"{label} (weight driven to 0 by correlation penalty)")
         skipped_line = f"Excluded: {'; '.join(skipped_reasons)}."
 
     expected_roi = (total_expected_gain / req.amount * 100) if req.amount > 0 else 0
 
-    cash_line = (f"Cash reserve: ${cash_dollars:.2f} ({cash_pct:.1f}%) — Half-Kelly risk buffer."
+    cash_line = (f"Cash reserve: ${cash_dollars:.2f} ({cash_pct:.1f}%) — {kelly_label} risk buffer."
                  if cash_pct > 0.5 else "")
 
+    top_display = f"{top_data['coin']} ({top_data.get('market_type', '')})"
     report_lines = [
-        f"KELLY-MARKOWITZ PORTFOLIO — Risk level {req.risk_level}/10 ({risk_label})",
+        f"KELLY-MARKOWITZ PORTFOLIO — Risk level {req.risk_level}/10 ({risk_label}) · {kelly_label} ({kf:.2f}×)",
         "",
         "━━━ This Run ━━━",
-        f"Markets with positive edge found: {len(active_positions)} of 7 tracked coins.",
+        f"Markets with positive edge found: {len(active_positions)} positions across {len(coins)} coin(s).",
         *(([skipped_line, ""]) if skipped_line else []),
         *(([cash_line, ""]) if cash_line else []),
         "Position breakdown:",
@@ -923,11 +945,11 @@ def optimize(req: OptimizeRequest):
         f"EXPECTED GAIN  ${total_expected_gain:+.2f}  ({expected_roi:+.1f}% on ${req.amount:.0f} deployed)",
         "",
         "━━━ Key Driver ━━━",
-        f"{top_coin} received the largest position ({top_data['weight']*100:.1f}%) because it has the highest",
-        f"Half-Kelly-weighted edge ({top_data['edge']*100:+.1f}%) relative to its correlation with the other selected coins.",
+        f"{top_display} received the largest position ({top_data['weight']*100:.1f}%) because it has the highest",
+        f"{kelly_label}-weighted edge ({top_data['edge']*100:+.1f}%) relative to its correlation with the other selected assets.",
         ("At this risk level, the optimizer concentrates into the top edge regardless of correlation."
          if req.risk_level >= 7
-         else "At this risk level, the optimizer diversifies: high correlation between coins is penalised, so even a slightly lower-edge coin may receive significant weight if it moves independently."),
+         else "At this risk level, the optimizer diversifies: high correlation between assets is penalised, so even a slightly lower-edge market may receive significant weight if it moves independently."),
     ]
 
     return {
@@ -1030,49 +1052,64 @@ def refresh_markets():
     return {"status": "refreshed", "total_markets": total}
 
 
+BACKTEST_RESULTS_PATH = "data/backtest_results.json"
+
+
 @app.get("/api/history")
 def get_history():
-    rng = random.Random(42)
-    base_date = datetime(2026, 3, 28)
+    """
+    Returns real backtest results from the last run of the backtester.
+    Run the backtester first:  python -m src.backtest.backtest
+    Falls back to an empty result if no backtest file exists yet.
+    """
+    if not os.path.exists(BACKTEST_RESULTS_PATH):
+        raise HTTPException(
+            status_code=404,
+            detail="No backtest results found. Run: python -m src.backtest.backtest",
+        )
 
-    history = []
-    cumulative = 1.0
-    wins = 0
+    with open(BACKTEST_RESULTS_PATH) as f:
+        data = json.load(f)
 
-    for i in range(90):
-        daily_return = rng.gauss(0.008, 0.030)
-        cumulative *= 1 + daily_return
-        if daily_return > 0:
-            wins += 1
+    return data
 
-        history.append({
-            "date": (base_date + timedelta(days=i)).strftime("%Y-%m-%d"),
-            "daily_return": round(daily_return * 100, 3),
-            "cumulative_return": round((cumulative - 1) * 100, 3),
-            "win_rate": round(wins / (i + 1), 3),
-        })
 
-    total_return = round((cumulative - 1) * 100, 2)
-    daily_rets = [d["daily_return"] for d in history]
-    std_dev = (sum((r - (total_return / 90)) ** 2 for r in daily_rets) / 90) ** 0.5
-    sharpe = round((total_return / 90) / (std_dev + 1e-9) * (252 ** 0.5), 2) if std_dev else 0
+OOS_RESULTS_PATH = "data/oos_results.json"
 
-    peak = 1.0
-    max_dd = 0.0
-    running = 1.0
-    for d in history:
-        running *= 1 + d["daily_return"] / 100
-        if running > peak:
-            peak = running
-        dd = (peak - running) / peak
-        if dd > max_dd:
-            max_dd = dd
 
-    return {
-        "total_return": total_return,
-        "win_rate": round(wins / 90, 3),
-        "sharpe_ratio": sharpe,
-        "max_drawdown": round(max_dd * 100, 2),
-        "days": 90,
-        "history": history,
-    }
+@app.get("/api/history/oos")
+def get_oos_history():
+    """
+    Returns out-of-sample evaluation results.
+    Run the OOS evaluator first:  python -m src.backtest.oos_eval
+    """
+    if not os.path.exists(OOS_RESULTS_PATH):
+        raise HTTPException(
+            status_code=404,
+            detail="No OOS results found. Run: python -m src.backtest.oos_eval",
+        )
+
+    with open(OOS_RESULTS_PATH) as f:
+        data = json.load(f)
+
+    return data
+
+
+@app.post("/api/backtest/run")
+def trigger_backtest():
+    """
+    Runs the full backtester in-process and saves results to data/backtest_results.json.
+    This can take several minutes (fetches closed markets + CLOB history).
+    """
+    from src.backtest.backtest import run_backtest
+    try:
+        result = run_backtest(save_path=BACKTEST_RESULTS_PATH)
+        return {
+            "status": "ok",
+            "n_trades": result["meta"]["n_valid_trades"],
+            "summary": result["summary"],
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))

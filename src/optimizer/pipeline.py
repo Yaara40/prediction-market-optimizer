@@ -8,20 +8,30 @@ from src.data.coingecko import get_correlation_matrix
 from src.optimizer.kelly_markowitz import optimize_portfolio
 
 # Numeric encoding used during training (must match train.py TYPE_MAP)
-MARKET_TYPE_INT = {"5min": 0, "15min": 1, "1hour": 2, "4hour": 3, "1day": 4, "weekly": 5, "monthly": 6, "all": 7}
+MARKET_TYPE_INT = {"5min": 0, "15min": 1, "1hour": 2, "4hour": 3, "1day": 4, "weekly": 5, "all": 7}
 
 MODEL_MAP = {
-    "5min":    "src/model/best_model_5min.pkl",
-    "15min":   "src/model/best_model_15min.pkl",
-    "1hour":   "src/model/best_model_1hour.pkl",
-    "4hour":   "src/model/best_model_4hour.pkl",
-    "1day":    "src/model/best_model_1day.pkl",
-    "weekly":  "src/model/best_model_weekly.pkl",
-    "monthly": "src/model/best_model_monthly.pkl",
-    "all":     "src/model/best_model_all.pkl",
+    "5min":   "src/model/best_model_5min.pkl",
+    "15min":  "src/model/best_model_15min.pkl",
+    "1hour":  "src/model/best_model_1hour.pkl",
+    "4hour":  "src/model/best_model_4hour.pkl",
+    "1day":   "src/model/best_model_1day.pkl",
+    "weekly": "src/model/best_model_weekly.pkl",
+    "all":    "src/model/best_model_all.pkl",
+}
+
+CALIBRATOR_MAP = {
+    "5min":   "src/model/calibrator_5min.pkl",
+    "15min":  "src/model/calibrator_15min.pkl",
+    "1hour":  "src/model/calibrator_1hour.pkl",
+    "4hour":  "src/model/calibrator_4hour.pkl",
+    "1day":   "src/model/calibrator_1day.pkl",
+    "weekly": "src/model/calibrator_weekly.pkl",
+    "all":    "src/model/calibrator_all.pkl",
 }
 
 MODELS = {}
+CALIBRATORS = {}
 
 def load_models():
     for name, path in MODEL_MAP.items():
@@ -29,6 +39,11 @@ def load_models():
             MODELS[name] = joblib.load(path)
         except FileNotFoundError:
             print(f"model not found: {path}")
+    for name, path in CALIBRATOR_MAP.items():
+        try:
+            CALIBRATORS[name] = joblib.load(path)
+        except FileNotFoundError:
+            pass  # calibrators are optional; fall back to raw model output
 
 def detect_market_type(question: str, market: dict = None) -> str:
     """Classify a market's timeframe.
@@ -69,11 +84,6 @@ def detect_market_type(question: str, market: dict = None) -> str:
     if re.search(r'what price will .+ hit .+\w+ \d{1,2}[-–]\w*\s*\d{1,2}', question, re.IGNORECASE):
         return "weekly"
 
-    # Multi-outcome monthly format: "What price will Bitcoin hit in July?" /
-    # "What price will Bitcoin hit in 2026?"
-    if re.search(r'what price will .+ hit in (\w+ 20\d\d|\w+)\??$', question, re.IGNORECASE):
-        return "monthly"
-
     # "Bitcoin above __ on July 20?" / "Bitcoin price on July 20?" — single day target
     if re.search(r'\b(above|price)\b.{0,30}on \w+ \d{1,2}\??$', question, re.IGNORECASE):
         return "1day"
@@ -90,8 +100,7 @@ def detect_market_type(question: str, market: dict = None) -> str:
                 if duration_hours <= 5:     return "1hour"
                 if duration_hours <= 20:    return "4hour"
                 if duration_hours <= 50:    return "1day"
-                if duration_hours <= 250:   return "weekly"
-                return "monthly"
+                return "weekly"
         except Exception:
             pass
 
@@ -101,14 +110,6 @@ def detect_market_type(question: str, market: dict = None) -> str:
         return "1day"
     if re.search(r'up or down on \w+ \d+\?', question, re.IGNORECASE):
         return "1day"
-
-    # "in <month> <year>" or "in 20XX" — monthly
-    if re.search(r'\bin (january|february|march|april|may|june|july|august|september|october|november|december)\b', question, re.IGNORECASE):
-        return "monthly"
-    if re.search(r'by (end of )?\w+ 20\d\d', question, re.IGNORECASE):
-        return "monthly"
-    if re.search(r'\bin 20\d\d\b', question, re.IGNORECASE):
-        return "monthly"
 
     # "this week" / "by <day of week>" / "by <month> <date>" — weekly
     if re.search(r'\bthis week\b|\bby (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', question, re.IGNORECASE):
@@ -287,10 +288,7 @@ def predict_probabilities(markets: dict) -> dict:
 
             if not has_real_history:
                 # No CLOB history → the synthetic flat trajectory gives the
-                # model no usable signal. The weekly/monthly models in
-                # particular are badly miscalibrated on flat inputs (monthly
-                # LGBMClassifier returns ~0.99 for almost any price; weekly
-                # RandomForest returns ~0.02). Fall back to market price so
+                # model no usable signal. Fall back to market price so
                 # edge = 0 and we don't surface false opportunities.
                 our_estimate = market_price
             else:
@@ -301,7 +299,13 @@ def predict_probabilities(markets: dict) -> dict:
                     pass
 
                 try:
-                    our_estimate = float(model.predict_proba(features)[0][1])
+                    raw_estimate = float(model.predict_proba(features)[0][1])
+                    # Apply isotonic calibration if available for this market type
+                    calibrator = CALIBRATORS.get(market_type) or CALIBRATORS.get("all")
+                    if calibrator is not None:
+                        our_estimate = float(calibrator.predict([raw_estimate])[0])
+                    else:
+                        our_estimate = raw_estimate
                 except:
                     our_estimate = market_price
 
