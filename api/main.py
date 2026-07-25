@@ -26,6 +26,10 @@ from src.optimizer.pipeline import (
 )
 from src.data.coingecko import get_correlation_matrix
 from src.optimizer.kelly_markowitz import optimize_portfolio, kelly_fraction_for_risk
+from src.data.fetch_1hour_markets import fetch_1hour_markets
+from src.data.fetch_4hour_markets import fetch_4hour_markets
+from src.data.fetch_daily_markets import fetch_daily_markets
+from src.data.fetch_weekly_markets import fetch_weekly_markets
 
 app = FastAPI(title="Prediction Market Optimizer API", version="1.0.0")
 
@@ -334,13 +338,25 @@ def fetch_active_markets(max_pages: int = 15, force_refresh: bool = False) -> di
 
         time.sleep(0.1)
 
-    print("Fetching 4h events from Polymarket events API...")
-    fourhour_raw = _fetch_events_by_tag("4h", now)
-    print(f"  4h sub-markets picked: {len(fourhour_raw)}")
+    print("Fetching 1h markets (Up or Down + above $X)...")
+    onehour_by_coin = fetch_1hour_markets()
+    onehour_raw = [m for mlist in onehour_by_coin.values() for m in mlist]
+    print(f"  1h markets found: {len(onehour_raw)}")
 
-    print("Fetching weekly events from Polymarket events API...")
-    weekly_raw = _fetch_events_by_tag("weekly", now)
-    print(f"  weekly sub-markets picked: {len(weekly_raw)}")
+    print("Fetching 4h markets (Up or Down per coin)...")
+    fourhour_by_coin = fetch_4hour_markets()
+    fourhour_raw = [m for mlist in fourhour_by_coin.values() for m in mlist]
+    print(f"  4h markets found: {len(fourhour_raw)}")
+
+    print("Fetching daily markets (Up or Down + price targets)...")
+    daily_by_coin = fetch_daily_markets()
+    daily_raw = [m for mlist in daily_by_coin.values() for m in mlist]
+    print(f"  daily markets found: {len(daily_raw)}")
+
+    print("Fetching weekly markets (above/price-range/candle)...")
+    weekly_by_coin = fetch_weekly_markets()
+    weekly_raw = [m for mlist in weekly_by_coin.values() for m in mlist]
+    print(f"  weekly markets found: {len(weekly_raw)}")
 
     # Pattern for 5min/15min markets: "10:55AM-11:00AM"
     def _is_short_window(question: str) -> bool:
@@ -361,12 +377,33 @@ def fetch_active_markets(max_pages: int = 15, force_refresh: bool = False) -> di
     seen_ids: set = set()
     skipped_short = 0
 
-    def _add_market(market: dict):
+    def _add_market(market: dict, from_keyset: bool = False):
         nonlocal skipped_short
         question = str(market.get("question", ""))
         if _is_short_window(question):
             skipped_short += 1
             return
+        # Markets from dedicated fetchers (1h, 4h, daily) are pre-filtered and
+        # correct — pass them straight through with no extra checks.
+        # Only apply noise filters to keyset and weekly raw sources.
+        if from_keyset:
+            # "above $X on [Date], [H]AM ET?" — handled by fetch_1hour_markets
+            if re.search(r'\babove\b.{1,30}on \w+ \d+, \d+[AP]M ET', question, re.IGNORECASE):
+                return
+            # "Will …  on [Date]?" — daily/weekly price targets, handled by dedicated fetchers
+            if re.search(r'\bwill\b.{1,40}\bon \w+ \d+\?', question, re.IGNORECASE):
+                return
+            # "Up or Down" from keyset: only keep current 1h/4h windows (end ≤ 4.5h)
+            # Daily "Up or Down on July 25?" comes from daily_raw, not keyset
+            if re.search(r'up or down', question, re.IGNORECASE):
+                ed = market.get("endDate", "")
+                if ed:
+                    try:
+                        end_dt = datetime.fromisoformat(ed.replace("Z", "+00:00"))
+                        if end_dt.timestamp() > now + 4.5 * 3600:
+                            return
+                    except Exception:
+                        pass
         mid = market.get("id")
         if mid and mid in seen_ids:
             return
@@ -379,9 +416,9 @@ def fetch_active_markets(max_pages: int = 15, force_refresh: bool = False) -> di
                 break
 
     for market in all_markets:
-        _add_market(market)
+        _add_market(market, from_keyset=True)
 
-    for market in fourhour_raw + weekly_raw:
+    for market in onehour_raw + fourhour_raw + daily_raw + weekly_raw:
         _add_market(market)
 
     total = sum(len(v) for v in filtered.values())

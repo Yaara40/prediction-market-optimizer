@@ -84,9 +84,15 @@ def detect_market_type(question: str, market: dict = None) -> str:
     if re.search(r'what price will .+ hit .+\w+ \d{1,2}[-–]\w*\s*\d{1,2}', question, re.IGNORECASE):
         return "weekly"
 
-    # "Bitcoin above __ on July 20?" / "Bitcoin price on July 20?" — single day target
-    if re.search(r'\b(above|price)\b.{0,30}on \w+ \d{1,2}\??$', question, re.IGNORECASE):
+    # "Coin Up or Down on July 25?" — daily binary
+    if re.search(r'up or down on \w+ \d+\?', question, re.IGNORECASE):
         return "1day"
+    # "Will coin reach/dip to $X on July 25?" — daily price target (fetch_daily_markets)
+    if re.search(r'will .{1,20}(reach|dip to).{1,30}on \w+ \d+\?', question, re.IGNORECASE):
+        return "1day"
+    # "Will the price of coin be above/less than $X on July 25?" — weekly multi-strike
+    if re.search(r'will the price of .{1,20}(above|less than|between).{1,30}on \w+ \d+\?', question, re.IGNORECASE):
+        return "weekly"
 
     # 3. Use startDate/endDate duration for everything else — most reliable for daily/weekly/monthly
     if market:
@@ -105,9 +111,6 @@ def detect_market_type(question: str, market: dict = None) -> str:
             pass
 
     # 4. Text-only fallback (no date info available)
-    # "will X reach/dip to Y on <date>?" — daily
-    if re.search(r'will \w+ (reach|dip to)', question, re.IGNORECASE):
-        return "1day"
     if re.search(r'up or down on \w+ \d+\?', question, re.IGNORECASE):
         return "1day"
 
