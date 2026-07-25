@@ -236,7 +236,6 @@ def _fetch_events_by_tag(tag_slug: str, now_ts: float) -> list:
         if not sub_markets:
             continue
 
-        # Pick the sub-market whose ltp (or bid or outcomePrices[0]) is nearest 0.5
         def _price(m):
             ltp = m.get("lastTradePrice")
             if ltp is not None:
@@ -275,13 +274,9 @@ def fetch_active_markets(max_pages: int = 15, force_refresh: bool = False) -> di
     Two sources are combined:
     1. /markets/keyset sorted by startDate desc — captures today's intraday
        (1hour, 4hour, 1day) markets.
-    2. /events?tag_slug=weekly and tag_slug=monthly — captures the weekly
-       and monthly grouped-event price-range markets that started weeks ago
-       and would never appear in the first N pages of the keyset endpoint.
-
-    For weekly/monthly events that contain many sub-markets (one per price
-    range), we pick the sub-market closest to 0.5 probability — it carries
-    the most uncertainty and the best ML signal.
+    2. /events?tag_slug=weekly — captures weekly grouped-event price-range
+       markets that started weeks ago and don't appear in the keyset endpoint.
+       Monthly markets are excluded — the monthly model is poorly calibrated.
     """
     global _active_cache, _active_cache_ts
 
@@ -339,10 +334,6 @@ def fetch_active_markets(max_pages: int = 15, force_refresh: bool = False) -> di
 
         time.sleep(0.1)
 
-    # Supplement with 4h/weekly events from the events API.
-    # These market types don't appear in the /markets/keyset endpoint —
-    # they're only accessible via /events?tag_slug=<slug>.
-    # Monthly markets are excluded — the monthly model is poorly calibrated.
     print("Fetching 4h events from Polymarket events API...")
     fourhour_raw = _fetch_events_by_tag("4h", now)
     print(f"  4h sub-markets picked: {len(fourhour_raw)}")
@@ -352,8 +343,6 @@ def fetch_active_markets(max_pages: int = 15, force_refresh: bool = False) -> di
     print(f"  weekly sub-markets picked: {len(weekly_raw)}")
 
     # Pattern for 5min/15min markets: "10:55AM-11:00AM"
-    _5min_pat = re.compile(r'\d+:\d+(AM|PM)-\d+:\d+(AM|PM)', re.IGNORECASE)
-
     def _is_short_window(question: str) -> bool:
         full = re.search(r'(\d+):(\d+)(AM|PM)-(\d+):(\d+)(AM|PM)', question, re.IGNORECASE)
         if not full:
@@ -536,9 +525,18 @@ def enrich_markets_with_history(markets: dict, top_n: int = 20) -> dict:
         for m in candidates:
             start_ts, end_ts = _parse_trading_window(m)
 
-            # Skip future markets — only process ones that have already started
-            if start_ts is None or start_ts > now_ts:
+            if end_ts is None:
                 continue
+            if end_ts <= now_ts:
+                continue  # already closed
+            if end_ts > now_ts + 26 * 3600:
+                # endDate > 26h away: either a future intraday session (pre-created
+                # by Polymarket) or a weekly market (runs 7 days).
+                # Weekly markets are kept — they have real prices and pass the
+                # has_real_price check below.
+                # Future intraday sessions have no trades yet (price ≈ 0.5, volume 0)
+                # and are caught by has_real_price → filtered out automatically.
+                pass  # let it fall through to the price-signal check
 
             # Skip markets with no real price signal (still at default 0.5 or zero)
             ltp = float(m.get("lastTradePrice") or 0)
@@ -973,6 +971,11 @@ def get_markets():
         for p in preds:
             # Skip short-window markets from the display table
             if p["market_type"] in ("5min", "15min"):
+                continue
+            # Skip markets with no real model signal — these have no CLOB history so
+            # our_estimate falls back to market_price, producing edge ≈ 0 and volume = 0.
+            # They are pre-created future sessions that slipped past the time filter.
+            if p["volume"] == 0 and abs(p["edge"]) < 0.01:
                 continue
             result.append({
                 "coin": coin,
