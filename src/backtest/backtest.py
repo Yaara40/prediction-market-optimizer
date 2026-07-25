@@ -94,6 +94,10 @@ def get_market_price(m: dict):
     (i.e. before resolution).  For resolved markets the API fields hold the
     post-resolution price (0 or 1), so we use the first point of the CLOB
     history instead.
+
+    Returns (price, entry_idx) where entry_idx is the history index used for
+    entry price — callers should truncate history[:entry_idx+1] before feeding
+    the market to any ML model to avoid look-ahead bias.
     """
     history = m.get("price_history", [])
     if len(history) >= 3:
@@ -101,11 +105,11 @@ def get_market_price(m: dict):
         idx = max(0, len(history) // 10)
         p = history[idx].get("p", 0.5)
         if 0.005 < p < 0.995:
-            return p
+            return p, idx
         # Fallback: first point
         p = history[0].get("p", 0.5)
         if 0.005 < p < 0.995:
-            return p
+            return p, 0
 
     # No history — try API price fields (works for non-intraday markets)
     for field in ["lastTradePrice", "bestBid", "bestAsk"]:
@@ -113,8 +117,8 @@ def get_market_price(m: dict):
         if raw:
             p = float(raw)
             if 0.005 < p < 0.995:
-                return p
-    return None
+                return p, None  # no index — full history is fine (it's empty anyway)
+    return None, None
 
 
 # ── Half-Kelly sizing ─────────────────────────────────────────────────────────
@@ -142,10 +146,15 @@ def compute_pnl(bet: float, entry_price: float, outcome: int, direction: str) ->
 
 # ── LR baseline prediction ────────────────────────────────────────────────────
 
-def lr_predict(baseline_model, market: dict, coin_idx: int, market_type: str):
+def lr_predict(baseline_model, market: dict, coin_idx: int, market_type: str,
+               entry_idx: int = None):
     if baseline_model is None:
         return None
     try:
+        # Truncate history to entry point to avoid look-ahead bias
+        if entry_idx is not None:
+            history = market.get("price_history", [])
+            market = {**market, "price_history": history[:entry_idx + 1]}
         df, _ = get_price_features_with_type(market, coin_idx, market_type)
         if df is None:
             return None
@@ -223,8 +232,8 @@ def run_backtest(save_path: str = "data/backtest_results.json") -> dict:
                "edge_too_high": 0, "wrong_type": 0}
 
     # reuse the same prediction function for both LR and RF
-    def baseline_predict(model, m, cidx, mtype):
-        return lr_predict(model, m, cidx, mtype)
+    def baseline_predict(model, m, cidx, mtype, entry_idx=None):
+        return lr_predict(model, m, cidx, mtype, entry_idx)
 
     print(f"\nProcessing {len(HISTORY_FILES)} history files...")
 
@@ -265,7 +274,7 @@ def run_backtest(save_path: str = "data/backtest_results.json") -> dict:
                     continue
 
                 # ── Entry price (early in the window) ──
-                entry_price = get_market_price(m)
+                entry_price, entry_idx = get_market_price(m)
                 if entry_price is None:
                     skipped["no_price"] += 1
                     continue
@@ -288,7 +297,13 @@ def run_backtest(save_path: str = "data/backtest_results.json") -> dict:
                     skipped["no_model"] += 1
                     continue
 
-                features_df, _ = get_price_features_with_type(m, coin_idx, market_type)
+                # Truncate price history to entry point — no look-ahead bias
+                if entry_idx is not None:
+                    m_truncated = {**m, "price_history": history[:entry_idx + 1]}
+                else:
+                    m_truncated = m
+
+                features_df, _ = get_price_features_with_type(m_truncated, coin_idx, market_type)
                 if features_df is None:
                     skipped["no_features"] += 1
                     continue
@@ -316,11 +331,11 @@ def run_backtest(save_path: str = "data/backtest_results.json") -> dict:
                     continue
 
                 # ── LR baseline ──
-                lr_estimate = lr_predict(baseline_model, m, coin_idx, market_type)
+                lr_estimate = lr_predict(baseline_model, m, coin_idx, market_type, entry_idx)
                 lr_edge     = (lr_estimate - entry_price) if lr_estimate is not None else None
 
                 # ── Random Forest baseline ──
-                rf_estimate = baseline_predict(rf_model, m, coin_idx, market_type)
+                rf_estimate = baseline_predict(rf_model, m, coin_idx, market_type, entry_idx)
                 rf_edge     = (rf_estimate - entry_price) if rf_estimate is not None else None
 
                 # ── Kelly sizing helper for this trade ──

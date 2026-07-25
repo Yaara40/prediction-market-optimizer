@@ -724,6 +724,10 @@ def run_pipeline_live(risk_level: int = 5):
             else:
                 correlation_matrix[i, j] = 0.5  # conservative default
 
+    # Force exact symmetry — numerical noise in full_corr can make the matrix
+    # slightly asymmetric, which would cause SLSQP to produce incorrect results.
+    correlation_matrix = (correlation_matrix + correlation_matrix.T) / 2.0
+
     allocations = optimize_portfolio(estimates, market_prices_map, correlation_matrix, risk_level)
 
     # best_markets keyed by asset_key for the endpoint to use
@@ -1070,11 +1074,23 @@ def get_dashboard():
             "total_markets": len(preds),
         }
 
+    # Load real model accuracy from the latest backtest results if available
+    model_accuracy = 0.464  # fallback: real post-fix win rate
+    try:
+        if os.path.exists(BACKTEST_RESULTS_PATH):
+            with open(BACKTEST_RESULTS_PATH) as _f:
+                _bt = json.load(_f)
+            model_accuracy = round(
+                _bt.get("summary", {}).get("our_model", {}).get("direction_accuracy_pct", 46.4) / 100, 4
+            )
+    except Exception:
+        pass
+
     return {
         "active_markets": len(all_preds),
         "opportunities": len(opportunities),
         "avg_edge": avg_edge,
-        "model_accuracy": 0.642,
+        "model_accuracy": model_accuracy,
         "coins": list(predictions.keys()),
         "coin_stats": coin_stats,
         "top_opportunities": top_with_coin,

@@ -194,7 +194,7 @@ def get_price_features(market: dict, coin_idx: int):
         def _snap(i):
             target = timestamps[0] + duration * i / max(n - 1, 1)
             closest = min(range(len(timestamps)), key=lambda j: abs(timestamps[j] - target))
-            return max(0.01, min(0.99, prices[closest]))
+            return max(0.001, min(0.999, prices[closest]))
 
         trajectory = [_snap(i) for i in range(n)]
 
@@ -207,7 +207,7 @@ def get_price_features(market: dict, coin_idx: int):
         def _at_pct(pct):
             target = timestamps[0] + duration * pct
             closest = min(range(len(timestamps)), key=lambda j: abs(timestamps[j] - target))
-            return max(0.01, min(0.99, prices[closest]))
+            return max(0.001, min(0.999, prices[closest]))
 
         price_early = _at_pct(0.05)
         price_mid   = _at_pct(0.50)
@@ -218,7 +218,7 @@ def get_price_features(market: dict, coin_idx: int):
         # Note: predict_probabilities() skips the ML model entirely when
         # price_history is absent, so this trajectory is only used as a
         # feature vector sanity-check and is not fed to the classifier.
-        mp_clamped = max(0.01, min(0.99, market_price))
+        mp_clamped = max(0.001, min(0.999, market_price))
         trajectory = [mp_clamped] * 10
         crossings = 0
         price_early = mp_clamped
@@ -299,7 +299,8 @@ def predict_probabilities(markets: dict) -> dict:
                     model_cols = model.feature_names_in_
                     features = features.reindex(columns=model_cols, fill_value=0)
                 except AttributeError:
-                    pass
+                    # Model has no feature_names_in_ (e.g. Pipeline); use raw features
+                    print(f"  [pipeline] model for {market_type} has no feature_names_in_ — skipping reindex for {question[:50]}")
 
                 try:
                     raw_estimate = float(model.predict_proba(features)[0][1])
@@ -309,7 +310,8 @@ def predict_probabilities(markets: dict) -> dict:
                         our_estimate = float(calibrator.predict([raw_estimate])[0])
                     else:
                         our_estimate = raw_estimate
-                except:
+                except Exception as e:
+                    print(f"  [pipeline] predict_proba failed for {question[:50]} ({market_type}): {e}")
                     our_estimate = market_price
 
             results[coin].append({

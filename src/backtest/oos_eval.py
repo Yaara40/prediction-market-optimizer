@@ -100,23 +100,26 @@ def get_market_price(m: dict):
     Best pre-resolution market price from CLOB history.
     Resolved markets have post-resolution price (0 or 1) in API fields,
     so use the first ~10% of the price trajectory instead.
+
+    Returns (price, entry_idx) where entry_idx is the history index used,
+    so the caller can truncate the trajectory to avoid look-ahead bias.
     """
     history = m.get("price_history", [])
     if len(history) >= MIN_HIST_PTS:
         idx = max(0, len(history) // 10)
         p = history[idx].get("p", 0.5)
         if 0.005 < p < 0.995:
-            return p
+            return p, idx
         p = history[0].get("p", 0.5)
         if 0.005 < p < 0.995:
-            return p
+            return p, 0
     for field in ["lastTradePrice", "bestBid", "bestAsk"]:
         raw = m.get(field)
         if raw:
             p = float(raw)
             if 0.005 < p < 0.995:
-                return p
-    return None
+                return p, None  # no index — API field, use full history
+    return None, None
 
 
 # ── PnL ───────────────────────────────────────────────────────────────────────
@@ -134,18 +137,24 @@ def compute_pnl(bet: float, entry_price: float, outcome: int, direction: str) ->
 # ── Model prediction (shared by LR, RF, ensemble) ────────────────────────────
 
 def model_predict(model, m: dict, coin_idx: int, market_type: str,
-                  entry_price: float = None):
+                  entry_price: float = None, entry_idx: int = None):
     """
-    Predict P(YES) for a market.
+    Predict P(YES) for a market using only prices known at entry time.
 
-    For resolved markets the API price fields (lastTradePrice, outcomePrices)
-    reflect the post-resolution value (0 or 1), which get_price_features()
-    rejects as invalid.  We inject the pre-resolution entry_price we already
-    computed from the price_history so the feature extractor sees a valid price.
+    Two sources of look-ahead bias are eliminated:
+    1. API fields (lastTradePrice, outcomePrices) reflect post-resolution values
+       (0 or 1) — injecting entry_price fixes this.
+    2. Full price_history includes data AFTER the entry point — truncating to
+       entry_idx fixes this. In live trading you only see prices up to now.
     """
     if model is None:
         return None
     try:
+        # Truncate history to what was known at entry
+        history = m.get("price_history", [])
+        if entry_idx is not None and entry_idx < len(history):
+            history = history[:entry_idx + 1]
+        m = {**m, "price_history": history}
         if entry_price is not None:
             m = {**m, "lastTradePrice": str(entry_price)}
         df, _ = get_price_features_with_type(m, coin_idx, market_type)
@@ -268,7 +277,7 @@ def run_oos_eval(save_path: str = "data/oos_results.json") -> dict:
                     continue
 
                 # ── Entry price ──
-                entry_price = get_market_price(m)
+                entry_price, entry_idx = get_market_price(m)
                 if entry_price is None:
                     skipped["no_price"] += 1
                     continue
@@ -291,8 +300,9 @@ def run_oos_eval(save_path: str = "data/oos_results.json") -> dict:
                     continue
 
                 # ── Ensemble prediction ──
+                # Pass entry_idx so model only sees prices known at entry time
                 our_estimate = model_predict(
-                    ensemble_model, m, coin_idx, market_type, entry_price
+                    ensemble_model, m, coin_idx, market_type, entry_price, entry_idx
                 )
                 if our_estimate is None:
                     skipped["no_features"] += 1
@@ -317,7 +327,7 @@ def run_oos_eval(save_path: str = "data/oos_results.json") -> dict:
                 our_pnl = compute_pnl(FLAT_BET, entry_price, outcome, direction)
 
                 # ── LR baseline ──
-                lr_est  = model_predict(lr_model, m, coin_idx, market_type, entry_price)
+                lr_est  = model_predict(lr_model, m, coin_idx, market_type, entry_price, entry_idx)
                 lr_pnl  = lr_corr = None
                 if lr_est is not None:
                     lr_dir  = "YES" if (lr_est - entry_price) >= 0 else "NO"
@@ -328,7 +338,7 @@ def run_oos_eval(save_path: str = "data/oos_results.json") -> dict:
                     )
 
                 # ── RF baseline ──
-                rf_est  = model_predict(rf_model, m, coin_idx, market_type, entry_price)
+                rf_est  = model_predict(rf_model, m, coin_idx, market_type, entry_price, entry_idx)
                 rf_pnl  = rf_corr = None
                 if rf_est is not None:
                     rf_dir  = "YES" if (rf_est - entry_price) >= 0 else "NO"

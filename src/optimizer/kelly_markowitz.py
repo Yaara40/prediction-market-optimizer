@@ -60,12 +60,19 @@ def optimize_portfolio(estimates: dict, market_prices: dict, correlation_matrix:
     ])
     kelly_fracs = np.clip(kelly_fracs, 0.0, 1.0)
 
-    # Kelly expected log-growth per unit weight for each coin:
-    #   g_i = p_i * log(1 + e_i) + (1 - p_i) * log(1 - e_i)
-    # where e_i = edge_i (our edge over the market price)
+    # Kelly expected log-growth per unit weight for each coin.
+    #
+    # Prediction markets are ASYMMETRIC bets:
+    #   • Buy YES at price q → win (1/q - 1) per unit if YES resolves, lose 1 if NO
+    #   • Log-growth = p * log(1/q) + (1-p) * log(1/(1-q))
+    #
+    # The symmetric formula  p*log(1+e) + (1-p)*log(1-e)  treats prediction
+    # markets as even-money bets with a symmetric payoff, which is WRONG when
+    # q ≠ 0.5.  For example at q=0.3 the win payoff is +2.33 but the loss is
+    # only -1, so the symmetric formula understates the true log-growth.
     log_gains = np.array([
-        estimates[c] * np.log(max(1.0 + edges[i], 1e-9))
-        + (1.0 - estimates[c]) * np.log(max(1.0 - edges[i], 1e-9))
+        estimates[c] * np.log(max(1.0 / max(market_prices[c], 1e-9), 1e-9))
+        + (1.0 - estimates[c]) * np.log(max(1.0 / max(1.0 - market_prices[c], 1e-9), 1e-9))
         for i, c in enumerate(coins)
     ])
 
