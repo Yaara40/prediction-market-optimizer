@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Prediction Market Optimizer — ML Portfolio System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d1117;
+      --surface:   #161b22;
+      --border:    #21262d;
+      --green:     #00d395;
+      --green-dim: rgba(0,211,149,0.1);
+      --blue:      #58a6ff;
+      --blue-dim:  rgba(88,166,255,0.1);
+      --purple:    #bc8cff;
+      --purple-dim:rgba(188,140,255,0.1);
+      --yellow:    #f3ba2f;
+      --red:       #f85149;
+      --text:      #e6edf3;
+      --muted:     #8b949e;
+      --faint:     #1c2128;
+    }
+
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Inter", sans-serif;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 48px; height: 58px;
+      background: rgba(13,17,23,0.88);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-logo { font-weight: 700; font-size: 15px; letter-spacing: -0.3px; color: var(--text); }
+    .nav-logo span { color: var(--green); font-family: "JetBrains Mono", monospace; }
+    .nav-links { display: flex; gap: 28px; }
+    .nav-links a { color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 500; transition: color 0.15s; }
+    .nav-links a:hover { color: var(--text); }
+
+    /* ── HERO ── */
+    .hero {
+      min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      text-align: center; padding: 120px 24px 80px;
+      position: relative; overflow: hidden;
+    }
+    .hero::before {
+      content: ""; position: absolute; top: -80px; left: 50%; transform: translateX(-50%);
+      width: 900px; height: 700px;
+      background: radial-gradient(ellipse at center, rgba(0,211,149,0.1) 0%, transparent 68%);
+      pointer-events: none;
+    }
+    .badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--green-dim); border: 1px solid rgba(0,211,149,0.28);
+      color: var(--green); font-size: 11px; font-weight: 700;
+      letter-spacing: 0.09em; text-transform: uppercase;
+      padding: 5px 14px; border-radius: 999px; margin-bottom: 30px;
+    }
+    .badge::before {
+      content: ""; width: 6px; height: 6px; border-radius: 50%;
+      background: var(--green); animation: blink 2s ease-in-out infinite;
+    }
+    .hero h1 {
+      font-size: clamp(34px, 6vw, 68px); font-weight: 800;
+      letter-spacing: -2.5px; line-height: 1.07; max-width: 860px; margin-bottom: 22px;
+    }
+    .hero h1 em {
+      font-style: normal;
+      background: linear-gradient(135deg, var(--green) 0%, #34d399 40%, var(--blue) 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .hero-sub {
+      font-size: 17px; color: var(--muted); max-width: 600px;
+      line-height: 1.75; margin-bottom: 44px;
+    }
+
+    .btn-row { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 72px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 22px; border-radius: 9px; font-size: 13px; font-weight: 600;
+      text-decoration: none; transition: all 0.18s; border: 1px solid transparent;
+    }
+    .btn-green  { background: var(--green); color: #0d1117; border-color: var(--green); }
+    .btn-green:hover { background: #00f0ab; transform: translateY(-1px); }
+    .btn-blue   { background: var(--blue-dim); color: var(--blue); border-color: rgba(88,166,255,0.3); }
+    .btn-blue:hover { background: rgba(88,166,255,0.18); transform: translateY(-1px); }
+    .btn-ghost  { background: transparent; color: var(--text); border-color: var(--border); }
+    .btn-ghost:hover { border-color: #444c56; background: var(--faint); }
+
+    /* Hero stat chips */
+    .hero-stats { display: flex; gap: 40px; flex-wrap: wrap; justify-content: center; }
+    .hstat { text-align: center; }
+    .hstat-val {
+      font-size: 30px; font-weight: 800; line-height: 1;
+      font-family: "JetBrains Mono", monospace; color: var(--green);
+    }
+    .hstat-val.pos { color: var(--green); }
+    .hstat-val.neg { color: var(--red); }
+    .hstat-lbl { font-size: 11px; color: var(--muted); margin-top: 5px; letter-spacing: 0.04em; }
+
+    /* divider */
+    hr { border: none; border-top: 1px solid var(--border); max-width: 1100px; margin: 0 auto; }
+
+    /* ── SECTIONS ── */
+    section { padding: 96px 24px; max-width: 1100px; margin: 0 auto; }
+    .slabel {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--green); margin-bottom: 10px;
+    }
+    .stitle {
+      font-size: clamp(24px, 4vw, 38px); font-weight: 800;
+      letter-spacing: -1px; line-height: 1.15; margin-bottom: 14px;
+    }
+    .ssub {
+      font-size: 15px; color: var(--muted); max-width: 580px;
+      line-height: 1.75; margin-bottom: 52px;
+    }
+
+    /* ── PIPELINE STEPS ── */
+    .pipeline { display: flex; flex-direction: column; gap: 0; position: relative; }
+    .pipeline::before {
+      content: ""; position: absolute; left: 23px; top: 0; bottom: 0;
+      width: 2px; background: linear-gradient(to bottom, var(--green), transparent);
+    }
+    .pstep { display: flex; gap: 24px; padding-bottom: 44px; position: relative; }
+    .pnum {
+      flex-shrink: 0; width: 48px; height: 48px; border-radius: 50%;
+      background: var(--green-dim); border: 2px solid var(--green);
+      display: flex; align-items: center; justify-content: center;
+      font-family: "JetBrains Mono", monospace; font-weight: 700;
+      font-size: 13px; color: var(--green); position: relative; z-index: 1;
+    }
+    .pbody h3 { font-size: 16px; font-weight: 700; margin-bottom: 6px; padding-top: 10px; }
+    .pbody p  { font-size: 14px; color: var(--muted); line-height: 1.7; max-width: 600px; }
+    .pbody .mono {
+      display: inline-block; margin-top: 8px;
+      background: var(--faint); border: 1px solid var(--border);
+      border-radius: 6px; padding: 3px 10px;
+      font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--green);
+    }
+
+    /* ── RESULTS TABLE ── */
+    .results-wrap { overflow-x: auto; }
+    table {
+      width: 100%; border-collapse: collapse;
+      font-size: 14px; margin-bottom: 12px;
+    }
+    thead th {
+      text-align: left; padding: 10px 16px;
+      font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    tbody tr { border-bottom: 1px solid var(--border); transition: background 0.15s; }
+    tbody tr:hover { background: var(--faint); }
+    tbody td { padding: 13px 16px; }
+    tbody tr:first-child td { color: var(--text); font-weight: 600; }
+    .roi-pos { color: var(--green); font-family: "JetBrains Mono", monospace; font-weight: 700; }
+    .roi-neg { color: var(--red);   font-family: "JetBrains Mono", monospace; font-weight: 700; }
+    .row-ours { background: rgba(0,211,149,0.05); }
+    .tag-kelly {
+      display: inline-block; background: var(--green-dim);
+      border: 1px solid rgba(0,211,149,0.25); border-radius: 5px;
+      padding: 1px 7px; font-size: 10px; color: var(--green);
+      font-weight: 700; margin-left: 6px; vertical-align: middle;
+    }
+
+    /* ── TECH CARDS ── */
+    .tech-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+    .tcard {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 22px 20px;
+    }
+    .tcard-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 12px;
+    }
+    .tags { display: flex; flex-wrap: wrap; gap: 7px; }
+    .tag {
+      background: var(--faint); border: 1px solid var(--border);
+      border-radius: 6px; padding: 3px 9px;
+      font-size: 11px; font-weight: 500; color: var(--text);
+      font-family: "JetBrains Mono", monospace;
+    }
+    .tag.g { background: var(--green-dim);  border-color: rgba(0,211,149,0.25); color: var(--green); }
+    .tag.b { background: var(--blue-dim);   border-color: rgba(88,166,255,0.25); color: var(--blue); }
+    .tag.p { background: var(--purple-dim); border-color: rgba(188,140,255,0.25); color: var(--purple); }
+    .tag.y { background: rgba(243,186,47,0.1); border-color: rgba(243,186,47,0.25); color: var(--yellow); }
+
+    /* ── CODE BLOCK ── */
+    .code-block {
+      background: #010409; border: 1px solid var(--border); border-radius: 12px;
+      padding: 26px 30px; font-family: "JetBrains Mono", monospace;
+      font-size: 12.5px; line-height: 2; overflow-x: auto;
+    }
+    .cd  { color: var(--blue); }
+    .cf  { color: var(--muted); }
+    .cn  { color: #4b5563; font-style: italic; }
+    .ch  { color: var(--green); }
+    .cy  { color: var(--yellow); }
+
+    /* ── ARCH DIAGRAM ── */
+    .arch {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 14px; padding: 36px;
+      display: flex; align-items: center; justify-content: center;
+      flex-wrap: wrap; gap: 0;
+    }
+    .ablock { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 110px; }
+    .abox {
+      background: var(--faint); border: 1px solid var(--border);
+      border-radius: 10px; padding: 12px 16px; text-align: center;
+      font-size: 12px; font-weight: 600; width: 118px; line-height: 1.4;
+    }
+    .abox.g { border-color: rgba(0,211,149,0.4);  color: var(--green);  background: var(--green-dim); }
+    .abox.b { border-color: rgba(88,166,255,0.4);  color: var(--blue);   background: var(--blue-dim); }
+    .abox.p { border-color: rgba(188,140,255,0.4); color: var(--purple); background: var(--purple-dim); }
+    .abox.y { border-color: rgba(243,186,47,0.4);  color: var(--yellow); background: rgba(243,186,47,0.08); }
+    .albl { font-size: 10px; color: var(--muted); }
+    .aarrow { font-size: 20px; color: var(--border); padding: 0 10px; margin-bottom: 22px; }
+
+    /* ── TEAM ── */
+    .team-grid { display: flex; gap: 16px; flex-wrap: wrap; }
+    .tmcard {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 24px 22px;
+      flex: 1; min-width: 180px; text-align: center;
+    }
+    .tmav {
+      width: 56px; height: 56px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--green), var(--blue));
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px; font-weight: 800; color: #0d1117;
+      margin: 0 auto 12px;
+    }
+    .tmname { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+    .tmrole { font-size: 12px; color: var(--muted); }
+
+    /* ── FOOTER ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 36px 24px; text-align: center;
+      font-size: 12px; color: var(--muted);
+    }
+    footer a { color: var(--green); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* ── ANIMS ── */
+    @keyframes blink {
+      0%,100% { opacity:1; transform:scale(1); }
+      50%      { opacity:0.35; transform:scale(0.65); }
+    }
+    @keyframes fade-up {
+      from { opacity:0; transform:translateY(22px); }
+      to   { opacity:1; transform:translateY(0); }
+    }
+    .fu  { animation: fade-up 0.65s ease both; }
+    .d1  { animation-delay: 0.08s; }
+    .d2  { animation-delay: 0.18s; }
+    .d3  { animation-delay: 0.30s; }
+    .d4  { animation-delay: 0.44s; }
+
+    @media (max-width: 680px) {
+      nav { padding: 0 20px; }
+      .nav-links { gap: 16px; }
+      .arch { flex-direction: column; }
+      .aarrow { transform: rotate(90deg); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-logo"><span>PMO</span> · Prediction Market Optimizer</div>
+  <div class="nav-links">
+    <a href="#about">About</a>
+    <a href="#pipeline">Pipeline</a>
+    <a href="#results">Results</a>
+    <a href="#tech">Tech</a>
+    <a href="#code">Code</a>
+    <a href="#team">Team</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="badge fu">Final Project · Ono Academic College · 2026</div>
+
+  <h1 class="fu d1">
+    ML-Powered Portfolio<br/>for <em>Crypto Prediction</em><br/>Markets
+  </h1>
+
+  <p class="hero-sub fu d2">
+    An end-to-end system that scrapes 13,000+ resolved Polymarket contracts,
+    trains per-timeframe gradient-boosting models, and allocates capital using
+    Kelly Criterion + Markowitz optimization — live.
+  </p>
+
+  <div class="btn-row fu d3">
+    <a href="VIDEO_LINK_HERE" class="btn btn-blue" target="_blank">▶&nbsp; Watch Demo Video</a>
+    <a href="PRESENTATION_LINK_HERE" class="btn btn-green" target="_blank">📊&nbsp; View Presentation</a>
+    <a href="https://github.com/Yaara40/prediction-market-optimizer" class="btn btn-ghost" target="_blank">⌥&nbsp; ML + API Repo</a>
+    <a href="https://github.com/Yaara40/robo-advisor-frontend" class="btn btn-ghost" target="_blank">◈&nbsp; Frontend Repo</a>
+  </div>
+
+  <div class="hero-stats fu d4">
+    <div class="hstat">
+      <div class="hstat-val pos">+2.26%</div>
+      <div class="hstat-lbl">In-Sample ROI (Half-Kelly)</div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-val pos">+0.49%</div>
+      <div class="hstat-lbl">OOS ROI (2,209 unseen trades)</div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-val">13,138</div>
+      <div class="hstat-lbl">Markets Scraped</div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-val">7 Coins</div>
+      <div class="hstat-lbl">BTC · ETH · SOL · XRP · BNB · DOGE · HYPE</div>
+    </div>
+  </div>
+</div>
+
+<hr />
+
+<!-- ABOUT -->
+<section id="about">
+  <div class="slabel">The Problem</div>
+  <h2 class="stitle">Prediction markets are mispriced — <br/>but finding the edge is hard</h2>
+  <p class="ssub">
+    Binary crypto prediction markets on Polymarket set prices through crowd wisdom,
+    but they are systematically mispriced around resolution — especially near
+    short-term price thresholds. This project builds an ML pipeline to quantify
+    that edge and allocate capital optimally.
+  </p>
+
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+    <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 26px;">
+      <div style="font-size: 24px; margin-bottom: 12px;">📉</div>
+      <h3 style="font-size: 14px; font-weight: 700; margin-bottom: 8px;">Baselines lose badly</h3>
+      <p style="font-size: 13px; color: var(--muted); line-height: 1.65;">Logistic regression loses −26.9%, random forest −35.4%, and always-betting-YES loses −43.5%. The market vig is real and punishing.</p>
+    </div>
+    <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 26px;">
+      <div style="font-size: 24px; margin-bottom: 12px;">🎯</div>
+      <h3 style="font-size: 14px; font-weight: 700; margin-bottom: 8px;">Kelly sizing is the key</h3>
+      <p style="font-size: 13px; color: var(--muted); line-height: 1.65;">Even with a sub-50% win rate, Kelly sizing turns a losing flat-bet strategy into a profitable one — bet big when edge is big, small when it's small.</p>
+    </div>
+    <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 26px;">
+      <div style="font-size: 24px; margin-bottom: 12px;">🧠</div>
+      <h3 style="font-size: 14px; font-weight: 700; margin-bottom: 8px;">Per-timeframe models</h3>
+      <p style="font-size: 13px; color: var(--muted); line-height: 1.65;">1-hour, 4-hour, daily, and weekly markets behave differently. A single model misses these dynamics — we train one GBM per window.</p>
+    </div>
+    <div style="background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 26px;">
+      <div style="font-size: 24px; margin-bottom: 12px;">⚡</div>
+      <h3 style="font-size: 14px; font-weight: 700; margin-bottom: 8px;">Fully live system</h3>
+      <p style="font-size: 13px; color: var(--muted); line-height: 1.65;">Hit Optimize and the system fetches live Polymarket data, enriches with CLOB price history, runs inference, and outputs a full portfolio allocation in seconds.</p>
+    </div>
+  </div>
+</section>
+
+<hr />
+
+<!-- PIPELINE -->
+<section id="pipeline">
+  <div class="slabel">System Design</div>
+  <h2 class="stitle">End-to-end ML pipeline</h2>
+  <p class="ssub">From raw Polymarket data to live portfolio allocation — six stages, two repos.</p>
+
+  <div class="pipeline">
+    <div class="pstep">
+      <div class="pnum">01</div>
+      <div class="pbody">
+        <h3>Data Collection</h3>
+        <p>Scraped 13,138 resolved binary crypto markets from the Polymarket Gamma API — BTC, ETH, SOL, XRP, BNB, DOGE, HYPE across four timeframes. Each market includes full CLOB price history (tick-by-tick prices during the trading window).</p>
+        <span class="mono">data/raw/price_history_*.json</span>
+      </div>
+    </div>
+    <div class="pstep">
+      <div class="pnum">02</div>
+      <div class="pbody">
+        <h3>Feature Engineering</h3>
+        <p>18 features extracted per market: price trajectory sampled at 10 timestamps, number of crossings above/below 0.5, price momentum, volatility, volume, spread, time-to-resolution, and coin identity. Designed to capture whether the market is drifting toward YES or NO.</p>
+        <span class="mono">src/optimizer/pipeline.py → get_price_features_with_type()</span>
+      </div>
+    </div>
+    <div class="pstep">
+      <div class="pnum">03</div>
+      <div class="pbody">
+        <h3>Model Training — Per-Timeframe GBM</h3>
+        <p>One gradient-boosting model per timeframe (1h, 4h, 1day, weekly) × coin, selected from CatBoost, LightGBM, XGBoost, and Random Forest by lowest Brier score (probability calibration loss). 25+ model files saved to disk.</p>
+        <span class="mono">src/model/model_*.pkl · catboost_info/</span>
+      </div>
+    </div>
+    <div class="pstep">
+      <div class="pnum">04</div>
+      <div class="pbody">
+        <h3>Post-Hoc Calibration</h3>
+        <p>Raw GBM outputs are overconfident — they cluster probabilities near 0 and 1. Isotonic Regression is applied post-hoc to map raw scores to calibrated probabilities. Expected Calibration Error (ECE) drops from 0.09–0.15 down to ~0.000.</p>
+        <span class="mono">src/model/calibrator_*.pkl</span>
+      </div>
+    </div>
+    <div class="pstep">
+      <div class="pnum">05</div>
+      <div class="pbody">
+        <h3>Kelly–Markowitz Portfolio Optimization</h3>
+        <p>For each market with positive edge (&gt;2%), the raw Kelly fraction is computed and scaled by the risk level (Quarter to Full Kelly). A Markowitz correlation penalty discourages concentrating in highly correlated same-coin positions. CoinGecko price correlations are used for cross-coin pairs.</p>
+        <span class="mono">src/optimizer/kelly_markowitz.py</span>
+      </div>
+    </div>
+    <div class="pstep">
+      <div class="pnum">06</div>
+      <div class="pbody">
+        <h3>Live Deployment — FastAPI + React</h3>
+        <p>A FastAPI backend fetches active markets every minute, enriches them with live CLOB price history, runs the full pipeline, and returns allocations. A React + TypeScript dashboard displays live opportunities, lets users optimize with a slider, and shows full backtest performance history.</p>
+        <span class="mono">api/main.py · robo-advisor-frontend/</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Arch diagram -->
+  <div class="arch" style="margin-top: 8px;">
+    <div class="ablock">
+      <div class="abox g">Polymarket<br/>Gamma API</div>
+      <div class="albl">Live data</div>
+    </div>
+    <div class="aarrow">→</div>
+    <div class="ablock">
+      <div class="abox b">Feature<br/>Extraction</div>
+      <div class="albl">18 features</div>
+    </div>
+    <div class="aarrow">→</div>
+    <div class="ablock">
+      <div class="abox p">GBM Ensemble<br/>+ Calibration</div>
+      <div class="albl">Per-timeframe</div>
+    </div>
+    <div class="aarrow">→</div>
+    <div class="ablock">
+      <div class="abox y">Kelly–<br/>Markowitz</div>
+      <div class="albl">Allocation</div>
+    </div>
+    <div class="aarrow">→</div>
+    <div class="ablock">
+      <div class="abox g">React<br/>Dashboard</div>
+      <div class="albl">Live UI</div>
+    </div>
+  </div>
+</section>
+
+<hr />
+
+<!-- RESULTS -->
+<section id="results">
+  <div class="slabel">Performance</div>
+  <h2 class="stitle">Backtest results</h2>
+  <p class="ssub">
+    All numbers are post look-ahead-bias fix. The model uses Half-Kelly sizing; baselines use flat $20/trade. Tested on 1,505 in-sample trades and 2,209 out-of-sample June 2026 trades.
+  </p>
+
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 40px;">
+
+    <div>
+      <p style="font-size: 12px; color: var(--muted); font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 12px;">In-Sample (1,505 trades)</p>
+      <div class="results-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>ROI</th>
+              <th>Win Rate</th>
+              <th>Sharpe</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="row-ours">
+              <td>Our Model <span class="tag-kelly">Half-Kelly</span></td>
+              <td class="roi-pos">+2.26%</td>
+              <td>46.4%</td>
+              <td>0.318</td>
+            </tr>
+            <tr>
+              <td>Our Model (Flat $20)</td>
+              <td class="roi-neg">−8.56%</td>
+              <td>46.4%</td>
+              <td>−1.378</td>
+            </tr>
+            <tr>
+              <td>LR Baseline</td>
+              <td class="roi-neg">−26.93%</td>
+              <td>37.5%</td>
+              <td>−4.515</td>
+            </tr>
+            <tr>
+              <td>Random Forest</td>
+              <td class="roi-neg">−35.36%</td>
+              <td>32.7%</td>
+              <td>−6.018</td>
+            </tr>
+            <tr>
+              <td>Always-YES</td>
+              <td class="roi-neg">−43.47%</td>
+              <td>28.5%</td>
+              <td>−7.663</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div>
+      <p style="font-size: 12px; color: var(--muted); font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 12px;">Out-of-Sample — June 2026 (2,209 trades)</p>
+      <div class="results-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Strategy</th>
+              <th>ROI</th>
+              <th>Win Rate</th>
+              <th>Sharpe</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="row-ours">
+              <td>Our Model <span class="tag-kelly">Half-Kelly</span></td>
+              <td class="roi-pos">+0.49%</td>
+              <td>52.7%</td>
+              <td>0.081</td>
+            </tr>
+            <tr>
+              <td>LR Baseline</td>
+              <td class="roi-neg">−2.09%</td>
+              <td>51.6%</td>
+              <td>−0.347</td>
+            </tr>
+            <tr>
+              <td>Random Forest</td>
+              <td class="roi-neg">−3.44%</td>
+              <td>49.3%</td>
+              <td>−0.550</td>
+            </tr>
+            <tr>
+              <td>Always-YES</td>
+              <td class="roi-neg">−5.20%</td>
+              <td>—</td>
+              <td>—</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <div style="background: var(--green-dim); border: 1px solid rgba(0,211,149,0.25); border-radius: 12px; padding: 20px 24px; font-size: 14px; color: var(--muted); line-height: 1.7;">
+    <strong style="color: var(--green);">Key insight:</strong> The model's flat-bet win rate (46.4%) is below 50% — it loses money betting equal amounts. But Kelly sizing bets proportionally larger when edge is larger, so <em style="color: var(--text);">wins are systematically larger than losses</em> even at a sub-50% hit rate. The OOS result (+0.49%) confirms this edge is real, not overfitted.
+  </div>
+</section>
+
+<hr />
+
+<!-- TECH -->
+<section id="tech">
+  <div class="slabel">Technology</div>
+  <h2 class="stitle">Tech stack</h2>
+  <p class="ssub">Two repositories — one for ML + API, one for the React frontend.</p>
+
+  <div class="tech-grid">
+    <div class="tcard">
+      <div class="tcard-label">ML & Data (prediction-market-optimizer)</div>
+      <div class="tags">
+        <span class="tag g">Python 3</span>
+        <span class="tag g">CatBoost</span>
+        <span class="tag g">LightGBM</span>
+        <span class="tag g">XGBoost</span>
+        <span class="tag">scikit-learn</span>
+        <span class="tag">Isotonic Regression</span>
+        <span class="tag">pandas</span>
+        <span class="tag">numpy</span>
+        <span class="tag">scipy</span>
+      </div>
+    </div>
+    <div class="tcard">
+      <div class="tcard-label">API (FastAPI)</div>
+      <div class="tags">
+        <span class="tag b">FastAPI</span>
+        <span class="tag b">Pydantic</span>
+        <span class="tag">joblib</span>
+        <span class="tag">Polymarket API</span>
+        <span class="tag">CoinGecko API</span>
+        <span class="tag">CLOB API</span>
+        <span class="tag">In-memory cache</span>
+      </div>
+    </div>
+    <div class="tcard">
+      <div class="tcard-label">Frontend (robo-advisor-frontend)</div>
+      <div class="tags">
+        <span class="tag p">React 18</span>
+        <span class="tag p">TypeScript</span>
+        <span class="tag p">Vite</span>
+        <span class="tag">Recharts</span>
+        <span class="tag">react-router-dom</span>
+        <span class="tag">CSS-in-JS</span>
+      </div>
+    </div>
+    <div class="tcard">
+      <div class="tcard-label">Portfolio Math</div>
+      <div class="tags">
+        <span class="tag y">Kelly Criterion</span>
+        <span class="tag y">Markowitz</span>
+        <span class="tag y">SLSQP optimizer</span>
+        <span class="tag">Brier Score</span>
+        <span class="tag">Sharpe Ratio</span>
+        <span class="tag">ECE Calibration</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr />
+
+<!-- CODE -->
+<section id="code">
+  <div class="slabel">Repository</div>
+  <h2 class="stitle">Code structure</h2>
+  <p class="ssub">Two open-source repos make up the full system.</p>
+
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 28px;">
+    <div>
+      <p style="font-size: 12px; color: var(--muted); margin-bottom: 10px; font-weight: 700;">prediction-market-optimizer</p>
+      <div class="code-block">
+<span class="cd">prediction-market-optimizer/</span>
+├── <span class="cd">api/</span>
+│   └── <span class="ch">main.py</span>          <span class="cn"># FastAPI server</span>
+├── <span class="cd">src/</span>
+│   ├── <span class="cd">optimizer/</span>
+│   │   ├── <span class="ch">pipeline.py</span>      <span class="cn"># inference + features</span>
+│   │   └── <span class="ch">kelly_markowitz.py</span>  <span class="cn"># allocation</span>
+│   ├── <span class="cd">model/</span>           <span class="cn"># 25+ trained .pkl files</span>
+│   ├── <span class="cd">backtest/</span>
+│   │   ├── <span class="ch">backtest.py</span>      <span class="cn"># in-sample eval</span>
+│   │   └── <span class="ch">oos_eval.py</span>      <span class="cn"># OOS eval</span>
+│   └── <span class="cd">data/</span>            <span class="cn"># fetch scripts</span>
+├── <span class="cd">data/</span>
+│   ├── <span class="cf">raw/</span>             <span class="cn"># 13k+ market JSONs</span>
+│   ├── <span class="cf">backtest_results.json</span>
+│   └── <span class="cf">oos_results.json</span>
+└── <span class="cd">notebook/</span>        <span class="cn"># EDA notebooks</span>
+      </div>
+    </div>
+    <div>
+      <p style="font-size: 12px; color: var(--muted); margin-bottom: 10px; font-weight: 700;">robo-advisor-frontend</p>
+      <div class="code-block">
+<span class="cd">robo-advisor-frontend/</span>
+└── <span class="cd">src/</span>
+    ├── <span class="cd">pages/</span>
+    │   ├── <span class="ch">DashboardPage.tsx</span>  <span class="cn"># live overview</span>
+    │   ├── <span class="ch">OptimizerPage.tsx</span>  <span class="cn"># allocate capital</span>
+    │   ├── <span class="ch">MarketsPage.tsx</span>    <span class="cn"># all live markets</span>
+    │   └── <span class="ch">HistoryPage.tsx</span>    <span class="cn"># backtest charts</span>
+    ├── <span class="cd">components/</span>
+    │   ├── <span class="cd">layout/</span>
+    │   │   ├── <span class="ch">Sidebar.tsx</span>
+    │   │   └── <span class="ch">Layout.tsx</span>
+    │   └── <span class="cd">shared/</span>
+    │       └── <span class="ch">LoadingSpinner.tsx</span>
+    └── <span class="cf">api/</span>               <span class="cn"># typed API client</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+    <a href="https://github.com/Yaara40/prediction-market-optimizer" class="btn btn-ghost" target="_blank">⌥ prediction-market-optimizer</a>
+    <a href="https://github.com/Yaara40/robo-advisor-frontend" class="btn btn-ghost" target="_blank">◈ robo-advisor-frontend</a>
+  </div>
+</section>
+
+<hr />
+
+<!-- TEAM -->
+<section id="team">
+  <div class="slabel">Team</div>
+  <h2 class="stitle">Built by</h2>
+  <p class="ssub">Final project — Computer Science, Ono Academic College, 2026.</p>
+
+  <div class="team-grid">
+    <div class="tmcard">
+      <div class="tmav">י</div>
+      <div class="tmname">Yaara Izchaki</div>
+      <div class="tmrole">ML · Backend · Frontend</div>
+    </div>
+    <!-- Add team members here -->
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <p>Prediction Market Optimizer · Final Project · <a href="https://www.ono.ac.il/" target="_blank">Ono Academic College</a> · 2026</p>
+  <p style="margin-top: 8px;">
+    <a href="https://github.com/Yaara40/prediction-market-optimizer" target="_blank">ML Repo</a> ·
+    <a href="https://github.com/Yaara40/robo-advisor-frontend" target="_blank">Frontend Repo</a> ·
+    <a href="VIDEO_LINK_HERE" target="_blank">Demo Video</a> ·
+    <a href="PRESENTATION_LINK_HERE" target="_blank">Presentation</a>
+  </p>
+</footer>
+
+</body>
+</html>
