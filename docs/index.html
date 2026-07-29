@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Prediction Market Optimizer — ML Portfolio System</title>
+  <title>KYMarket — ML Portfolio System</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
   <style>
@@ -44,8 +44,8 @@
       backdrop-filter: blur(14px);
       border-bottom: 1px solid var(--border);
     }
-    .nav-logo { font-weight: 700; font-size: 15px; letter-spacing: -0.3px; color: var(--text); }
-    .nav-logo span { color: var(--green); font-family: "JetBrains Mono", monospace; }
+    .nav-logo { display: flex; align-items: center; }
+    .nav-logo img { height: 38px; width: auto; object-fit: contain; }
     .nav-links { display: flex; gap: 28px; }
     .nav-links a { color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 500; transition: color 0.15s; }
     .nav-links a:hover { color: var(--text); }
@@ -286,7 +286,7 @@
 
 <!-- NAV -->
 <nav>
-  <div class="nav-logo"><span>PMO</span> · Prediction Market Optimizer</div>
+  <div class="nav-logo"><img src="kymarket-logo.png" alt="KYMarket" /></div>
   <div class="nav-links">
     <a href="#about">About</a>
     <a href="#pipeline">Pipeline</a>
@@ -714,7 +714,7 @@
 
 <!-- FOOTER -->
 <footer>
-  <p>Prediction Market Optimizer · Final Project · <a href="https://www.ono.ac.il/" target="_blank">Ono Academic College</a> · 2026</p>
+  <p>KYMarket · Final Project · <a href="https://www.ono.ac.il/" target="_blank">Ono Academic College</a> · 2026</p>
   <p style="margin-top: 8px;">
     <a href="https://github.com/Yaara40/prediction-market-optimizer" target="_blank">ML Repo</a> ·
     <a href="https://github.com/Yaara40/robo-advisor-frontend" target="_blank">Frontend Repo</a> ·
